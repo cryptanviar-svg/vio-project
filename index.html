@@ -26,6 +26,10 @@
     };
   </script>
   <style>
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    /* 100dvh враховує рухомий адресний рядок мобільного Safari/Chrome */
+    body { min-height: 100vh; min-height: 100dvh; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; }
     body { background: #07070a; transition: background-color .6s ease; }
     /* Нічна вкладка: чистий #000 і приглушені поверхні — пікселі OLED вимкнені */
     body[data-tab="night"] { background: #000; }
@@ -38,7 +42,7 @@
     .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
   </style>
 </head>
-<body data-tab="night" class="min-h-screen font-sans text-zinc-200 antialiased">
+<body data-tab="night" class="font-sans text-zinc-200 antialiased">
 
   <!-- Fail-Safe плашка аудіовиходу -->
   <header class="sticky top-0 z-40 safe-top bg-black/80 backdrop-blur border-b border-zinc-900">
@@ -212,9 +216,54 @@ const ENGINE_CONFIG = Object.freeze({
   VIB_PAUSE_MS: 250
 });
 
+/* Спільний AudioContext: мобільний WebKit блокує звук до жесту користувача, тож розблокування централізоване */
+const UNLOCK_TARGETS = '.tab-btn, [id$="-toggle"], #exercise-list button';
+const VioAudio = (() => {
+  let shared = null;
+
+  function getContext() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!shared || shared.state === 'closed') shared = new AudioCtx({ latencyHint: 'interactive' });
+    return shared;
+  }
+
+  // Короткий беззвучний буфер остаточно знімає блокування виходу на iOS
+  function playSilence(context) {
+    const source = context.createBufferSource();
+    source.buffer = context.createBuffer(1, 1, context.sampleRate);
+    source.connect(context.destination);
+    source.start(0);
+  }
+
+  // 'suspended' — типове блокування, 'interrupted' — iOS після дзвінка чи згортання
+  async function unlock() {
+    const context = getContext();
+    if (!context || context.state === 'running') return context;
+    try {
+      playSilence(context);
+      await context.resume();
+    } catch (err) {
+      console.error('VIO: не вдалося розблокувати AudioContext', err);
+    }
+    return context;
+  }
+
+  function onUnlockGesture(event) {
+    if (event.target.closest && event.target.closest(UNLOCK_TARGETS)) unlock();
+  }
+
+  ['click', 'touchend'].forEach((type) => {
+    document.addEventListener(type, onUnlockGesture, { capture: true, passive: true });
+  });
+
+  return { getContext, unlock };
+})();
+
 function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
+  let chain = [];
   let stream = null;
   let analyser = null;
   let master = null;
@@ -394,12 +443,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   async function start() {
     if (ctx) return;
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) throw new Error('Web Audio API недоступний у цьому браузері.');
+    const context = VioAudio.getContext();
+    if (!context) throw new Error('Web Audio API недоступний у цьому браузері.');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Цей браузер не дає доступу до мікрофона.');
     }
-    const context = new AudioCtx({ latencyHint: 'interactive' });
+    VioAudio.unlock();
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -407,10 +456,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       });
     } catch (err) {
       console.error('VIO: помилка getUserMedia', err);
-      await context.close();
       throw new Error(micErrorMessage(err));
     }
-    await context.resume();
+    await VioAudio.unlock();
+    if (context.state !== 'running') {
+      micStream.getTracks().forEach((track) => track.stop());
+      throw new Error('Браузер заблокував звук. Торкніться кнопки старту ще раз.');
+    }
 
     const source = context.createMediaStreamSource(micStream);
     const highpass = context.createBiquadFilter();
@@ -431,6 +483,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     out.connect(context.destination);
 
     ctx = context;
+    chain = [source, highpass, lowpass, out];
     stream = micStream;
     analyser = node;
     master = out;
@@ -450,12 +503,16 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (st.episode && st.episode.reflex2) stopReflex2(st.episode.reflex2);
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     stream.getTracks().forEach((track) => track.stop());
-    const closing = ctx;
+    const released = ctx;
     ctx = null;
+    chain.forEach((node) => node.disconnect());
+    chain = [];
+    // Контекст спільний і лишається відкритим; повертаємо системний вихід після можливого резерву
+    if (typeof released.setSinkId !== 'function') return;
     try {
-      await closing.close();
+      await released.setSinkId('');
     } catch (err) {
-      console.error('VIO: не вдалося закрити AudioContext', err);
+      console.error('VIO: не вдалося скинути вихід AudioContext', err);
     }
   }
 
@@ -512,6 +569,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     session: null,
     engine: null,
     wakeLock: null,
+    isWakeLockPending: false,
+    isWakeLockWarned: false,
     isStarting: false,
     tickId: null,
     maskIdleId: null,
@@ -691,21 +750,51 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     showAlert('Fail-Safe: втрачено доступ до мікрофона. Нічну сесію зупинено.');
   }
 
+  function isNightSessionActive() {
+    return Boolean(state.session) && state.session.mode === 'night';
+  }
+
+  function releaseSentinel(sentinel) {
+    sentinel.release().catch((err) => console.error('VIO: помилка звільнення wake lock', err));
+  }
+
+  // Запит Wake Lock потрібен лише для видимої сторінки; браузер сам знімає його, коли додаток згорнуто
   async function acquireWakeLock() {
-    if (!('wakeLock' in navigator)) return;
+    if (!('wakeLock' in navigator)) {
+      if (!state.isWakeLockWarned) {
+        state.isWakeLockWarned = true;
+        logEvent('Wake Lock не підтримується цим браузером — екран може заснути, слухання перерветься');
+      }
+      return;
+    }
+    if (state.wakeLock || state.isWakeLockPending || document.visibilityState !== 'visible') return;
+    state.isWakeLockPending = true;
     try {
-      state.wakeLock = await navigator.wakeLock.request('screen');
-      state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+      const sentinel = await navigator.wakeLock.request('screen');
+      if (!isNightSessionActive()) {
+        releaseSentinel(sentinel);
+        return;
+      }
+      sentinel.addEventListener('release', () => {
+        if (state.wakeLock !== sentinel) return;
+        state.wakeLock = null;
+        logEvent('Wake Lock звільнено системою (додаток згорнуто) — відновлю після повернення');
+      });
+      state.wakeLock = sentinel;
+      logEvent('Wake Lock активний — екран не засинає');
     } catch (err) {
       console.error('VIO: wake lock недоступний', err);
       logEvent('Не вдалося утримувати екран увімкненим — слухання може перерватись у фоні');
+    } finally {
+      state.isWakeLockPending = false;
     }
   }
 
   function releaseWakeLock() {
-    if (!state.wakeLock) return;
-    state.wakeLock.release().catch((err) => console.error('VIO: помилка звільнення wake lock', err));
+    const sentinel = state.wakeLock;
+    if (!sentinel) return;
     state.wakeLock = null;
+    releaseSentinel(sentinel);
   }
 
   async function startSession(mode) {
@@ -927,8 +1016,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     }
     $('output-action').addEventListener('click', onOutputAction);
     document.addEventListener('visibilitychange', () => {
-      const isNight = state.session && state.session.mode === 'night';
-      if (document.visibilityState === 'visible' && isNight && !state.wakeLock) acquireWakeLock();
+      if (document.visibilityState === 'visible' && isNightSessionActive()) {
+        acquireWakeLock();
+        VioAudio.unlock();
+      }
     });
     $('report-clear').addEventListener('click', () => {
       if (window.confirm('Видалити всю історію сесій?')) {
@@ -1002,7 +1093,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const exerciseUi = new Map();
   let tone = 0;
   let running = null;
-  let audioCtx = null;
   const cam = { stream: null, attempt: 0, trackId: null, marks: [] };
 
   function el(tag, className, text) {
@@ -1049,19 +1139,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   /* ---------- Звук успіху (Web Audio) ---------- */
 
-  function getAudioContext() {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return null;
-    if (!audioCtx) audioCtx = new AudioCtx({ latencyHint: 'interactive' });
-    return audioCtx;
-  }
-
-  // Контекст створюється й розблоковується в момент натискання «Старт» (жест користувача)
-  function unlockAudio() {
-    const ctx = getAudioContext();
-    if (ctx) ctx.resume().catch((err) => console.error('VIO: не вдалося запустити AudioContext', err));
-  }
-
   function playNote(ctx, hz, startAt) {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -1077,7 +1154,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   }
 
   function playSuccessSound() {
-    const ctx = getAudioContext();
+    const ctx = VioAudio.getContext();
     if (!ctx) {
       console.error('VIO: Web Audio API недоступний');
       return;
@@ -1168,7 +1245,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       if (running.id === id) cancelExercise();
       return;
     }
-    unlockAudio();
     running = { id, startedAt: Date.now(), timerId: setInterval(tickExercise, EXERCISE_TICK_MS) };
     renderExercises();
   }
@@ -1297,6 +1373,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     cam.stream = stream;
     stream.getVideoTracks().forEach((track) => track.addEventListener('ended', stopCamera));
     $('cam-video').srcObject = stream;
+    $('cam-video').play().catch((err) => console.error('VIO: відео не стартувало автоматично', err));
     $('cam-note').textContent = 'Відео обробляється лише на пристрої, нікуди не надсилається.';
     setCameraUi(true);
     syncCanvasSize();
