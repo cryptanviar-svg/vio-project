@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>VIO</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: { 950: '#07070a', 900: '#0d0d12', 800: '#14141b', 700: '#1d1d27' },
+            gold: { 400: '#e6c581', 500: '#d4a94f' }
+          },
+          fontFamily: { sans: ['Inter', 'system-ui', 'Segoe UI', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <style>
+    body { background: #07070a; transition: background-color .6s ease; }
+    /* Нічна вкладка: чистий #000 і приглушені поверхні — пікселі OLED вимкнені */
+    body[data-tab="night"] { background: #000; }
+    body[data-tab="night"] .surface { background: #000; border-color: #1a1a20; }
+    body[data-tab="night"] .accent { color: #8a7648; }
+    body[data-tab="night"] .btn-primary { background: #1a1608; color: #b89a52; }
+    #mask { transition: opacity .8s ease; }
+    #mask-clock { transition: top 1s ease, left 1s ease; }
+    .safe-top { padding-top: max(env(safe-area-inset-top), 0px); }
+    .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
+  </style>
+</head>
+<body data-tab="night" class="min-h-screen font-sans text-zinc-200 antialiased">
+
+  <!-- Fail-Safe плашка аудіовиходу -->
+  <header class="sticky top-0 z-40 safe-top bg-black/80 backdrop-blur border-b border-zinc-900">
+    <div id="output-bar" role="status" aria-live="assertive"
+         class="mx-auto flex max-w-xl items-center gap-3 px-4 py-3">
+      <span id="output-dot" class="h-2.5 w-2.5 shrink-0 rounded-full bg-zinc-600"></span>
+      <div class="min-w-0 flex-1">
+        <p class="text-[11px] uppercase tracking-widest text-zinc-500">Аудіовихід</p>
+        <p id="output-label" class="truncate text-sm font-medium text-zinc-200">Перевірка…</p>
+      </div>
+      <button id="output-action" type="button"
+              class="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 active:bg-zinc-900">
+        Перевірити
+      </button>
+    </div>
+    <p id="output-alert" role="alert" class="hidden bg-red-950 px-4 py-2 text-center text-xs text-red-200"></p>
+  </header>
+
+  <main class="mx-auto max-w-xl px-4 pb-32 pt-6">
+
+    <!-- Ніч -->
+    <section id="tab-night" role="tabpanel" aria-labelledby="btn-night" class="space-y-4">
+      <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-6">
+        <p class="accent text-xs uppercase tracking-widest text-gold-400">Нічний режим</p>
+        <p id="night-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
+        <p id="night-status" class="mt-2 text-center text-sm text-zinc-500">Сесію не запущено</p>
+        <button id="night-toggle" type="button"
+                class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
+          Почати нічну сесію
+        </button>
+      </div>
+      <p class="px-2 text-xs leading-relaxed text-zinc-600">
+        Нічна сесія стартує лише з Bluetooth-гарнітурою. Якщо звук перемкнеться на динамік —
+        сесію буде зупинено автоматично. За бездіяльності екран маскується чорним для економії OLED.
+      </p>
+    </section>
+
+    <!-- День -->
+    <section id="tab-day" role="tabpanel" aria-labelledby="btn-day" class="hidden space-y-4">
+      <div class="surface rounded-3xl border border-zinc-800 bg-gradient-to-b from-ink-800 to-ink-900 p-6">
+        <p class="accent text-xs uppercase tracking-widest text-gold-400">Денний режим</p>
+        <p id="day-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
+        <p id="day-status" class="mt-2 text-center text-sm text-zinc-500">Сесію не запущено</p>
+        <button id="day-toggle" type="button"
+                class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
+          Почати денну сесію
+        </button>
+      </div>
+      <p class="px-2 text-xs leading-relaxed text-zinc-600">
+        Удень дозволені обидва виходи: гарнітура й динамік смартфона.
+      </p>
+    </section>
+
+    <!-- Звіти -->
+    <section id="tab-reports" role="tabpanel" aria-labelledby="btn-reports" class="hidden space-y-4">
+      <div class="grid grid-cols-3 gap-3">
+        <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
+          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Сесій</p>
+          <p id="stat-count" class="mt-2 text-2xl font-light text-zinc-100">0</p>
+        </div>
+        <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
+          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Разом</p>
+          <p id="stat-total" class="mt-2 text-2xl font-light text-zinc-100">0 хв</p>
+        </div>
+        <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
+          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Fail-Safe</p>
+          <p id="stat-failsafe" class="mt-2 text-2xl font-light text-zinc-100">0</p>
+        </div>
+      </div>
+      <ul id="report-list" class="space-y-2"></ul>
+      <p id="report-empty" class="py-8 text-center text-sm text-zinc-600">Поки що немає завершених сесій</p>
+      <button id="report-clear" type="button"
+              class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-400 active:bg-zinc-900">
+        Очистити історію
+      </button>
+    </section>
+  </main>
+
+  <!-- Нижня навігація -->
+  <nav class="fixed inset-x-0 bottom-0 z-40 safe-bottom border-t border-zinc-900 bg-black/90 backdrop-blur">
+    <div role="tablist" class="mx-auto grid max-w-xl grid-cols-3">
+      <button id="btn-night" role="tab" data-tab="night" type="button" class="tab-btn py-4 text-sm">Ніч</button>
+      <button id="btn-day" role="tab" data-tab="day" type="button" class="tab-btn py-4 text-sm">День</button>
+      <button id="btn-reports" role="tab" data-tab="reports" type="button" class="tab-btn py-4 text-sm">Звіти</button>
+    </div>
+  </nav>
+
+  <!-- OLED-маска: повністю чорний екран із ледь помітним таймером -->
+  <div id="mask" class="pointer-events-none fixed inset-0 z-50 bg-black opacity-0" aria-hidden="true">
+    <p id="mask-clock" class="absolute text-2xl font-light tabular-nums" style="color:#2a2a2e"></p>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const STORAGE_KEY = 'vio.sessions';
+  const MASK_IDLE_MS = 10000;
+  const MASK_SHIFT_MS = 60000;
+  const MAX_STORED_SESSIONS = 200;
+  const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
+
+  const OUTPUT = {
+    bluetooth: { text: 'Bluetooth-гарнітура', dot: 'bg-emerald-400' },
+    speaker: { text: 'Динамік смартфона', dot: 'bg-amber-400' },
+    unknown: { text: 'Невизначено (вважається динаміком)', dot: 'bg-zinc-600' }
+  };
+  const TAB_ACTIVE = ['text-gold-400', 'font-semibold'];
+  const TAB_IDLE = ['text-zinc-500'];
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    tab: 'night',
+    output: 'unknown',
+    manualHeadset: false,
+    session: null,
+    tickId: null,
+    maskIdleId: null,
+    maskShiftId: null
+  };
+
+  /* ---------- Сховище звітів ---------- */
+
+  function isValidSession(s) {
+    return s && (s.mode === 'night' || s.mode === 'day')
+      && Number.isFinite(s.start) && Number.isFinite(s.seconds)
+      && (s.endedBy === 'user' || s.endedBy === 'failsafe');
+  }
+
+  function loadSessions() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed.filter(isValidSession) : [];
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати історію', err);
+      return [];
+    }
+  }
+
+  function saveSessions(list) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list.slice(-MAX_STORED_SESSIONS)));
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти історію', err);
+      showAlert('Не вдалося зберегти сесію: сховище недоступне.');
+    }
+  }
+
+  /* ---------- Утиліти ---------- */
+
+  function formatClock(totalSeconds) {
+    const m = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+    const s = String(totalSeconds % 60).padStart(2, '0');
+    return `${m}:${s}`;
+  }
+
+  function formatDuration(totalSeconds) {
+    const minutes = Math.round(totalSeconds / 60);
+    if (minutes < 60) return `${minutes} хв`;
+    return `${Math.floor(minutes / 60)} год ${minutes % 60} хв`;
+  }
+
+  function showAlert(message) {
+    const el = $('output-alert');
+    el.textContent = message;
+    el.classList.toggle('hidden', !message);
+  }
+
+  /* ---------- Fail-Safe: аудіовихід ---------- */
+
+  async function detectOutput() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return 'unknown';
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.label);
+      if (outputs.length === 0) return 'unknown';
+      const active = outputs.find((d) => d.deviceId === 'default') || outputs[0];
+      return BLUETOOTH_PATTERN.test(active.label) ? 'bluetooth' : 'speaker';
+    } catch (err) {
+      console.error('VIO: помилка визначення аудіовиходу', err);
+      return 'unknown';
+    }
+  }
+
+  function effectiveOutput() {
+    return state.output === 'unknown' && state.manualHeadset ? 'bluetooth' : state.output;
+  }
+
+  function renderOutput() {
+    const kind = effectiveOutput();
+    const info = OUTPUT[kind];
+    $('output-label').textContent = state.manualHeadset && state.output === 'unknown'
+      ? 'Bluetooth-гарнітура (підтверджено вручну)' : info.text;
+    $('output-dot').className = `h-2.5 w-2.5 shrink-0 rounded-full ${info.dot}`;
+    $('output-action').textContent = state.output === 'unknown' && !state.manualHeadset
+      ? 'Підтвердити' : 'Перевірити';
+  }
+
+  async function refreshOutput() {
+    state.output = await detectOutput();
+    if (state.output !== 'unknown') state.manualHeadset = false;
+    renderOutput();
+    enforceFailSafe();
+  }
+
+  // Запит дозволу на мікрофон потрібен лише щоб браузер показав назви пристроїв
+  async function requestDeviceLabels() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      return true;
+    } catch (err) {
+      console.error('VIO: дозвіл на пристрої відхилено', err);
+      return false;
+    }
+  }
+
+  async function onOutputAction() {
+    if (state.output === 'unknown' && !state.manualHeadset) {
+      const granted = await requestDeviceLabels();
+      await refreshOutput();
+      if (state.output === 'unknown') {
+        const confirmed = window.confirm(
+          granted
+            ? 'Браузер не показує тип аудіовиходу. Гарнітура Bluetooth підключена?'
+            : 'Немає доступу до списку пристроїв. Гарнітура Bluetooth підключена?'
+        );
+        state.manualHeadset = confirmed;
+        renderOutput();
+      }
+      return;
+    }
+    state.manualHeadset = false;
+    await refreshOutput();
+  }
+
+  function enforceFailSafe() {
+    const s = state.session;
+    if (!s || s.mode !== 'night' || effectiveOutput() === 'bluetooth') return;
+    stopSession('failsafe');
+    showAlert('Fail-Safe: Bluetooth-гарнітуру втрачено. Нічну сесію зупинено — звук не піде на динамік.');
+  }
+
+  /* ---------- Сесії ---------- */
+
+  function startSession(mode) {
+    if (state.session) return;
+    if (mode === 'night' && effectiveOutput() !== 'bluetooth') {
+      showAlert('Нічну сесію можна почати лише з Bluetooth-гарнітурою.');
+      return;
+    }
+    showAlert('');
+    state.session = { mode, start: Date.now(), seconds: 0 };
+    state.tickId = setInterval(tick, 1000);
+    renderSession();
+    if (mode === 'night') armMask();
+  }
+
+  function stopSession(endedBy) {
+    const s = state.session;
+    if (!s) return;
+    clearInterval(state.tickId);
+    state.session = null;
+    const seconds = Math.round((Date.now() - s.start) / 1000);
+    saveSessions([...loadSessions(), { mode: s.mode, start: s.start, seconds, endedBy }]);
+    disarmMask();
+    renderSession();
+    renderReports();
+  }
+
+  function tick() {
+    const s = state.session;
+    if (!s) return;
+    s.seconds = Math.round((Date.now() - s.start) / 1000);
+    renderSession();
+  }
+
+  function renderSession() {
+    const s = state.session;
+    for (const mode of ['night', 'day']) {
+      const active = Boolean(s) && s.mode === mode;
+      const blocked = Boolean(s) && s.mode !== mode;
+      const label = mode === 'night' ? 'нічну' : 'денну';
+      $(`${mode}-timer`).textContent = formatClock(active ? s.seconds : 0);
+      $(`${mode}-status`).textContent = active ? 'Сесія триває' : blocked ? 'Іншу сесію запущено' : 'Сесію не запущено';
+      $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : `Почати ${label} сесію`;
+      $(`${mode}-toggle`).disabled = blocked;
+      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked);
+    }
+    $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
+  }
+
+  /* ---------- OLED-маскування ---------- */
+
+  function showMask() {
+    $('mask').classList.remove('opacity-0', 'pointer-events-none');
+    $('mask').classList.add('opacity-100');
+    $('mask').setAttribute('aria-hidden', 'false');
+    shiftMaskClock();
+  }
+
+  function hideMask() {
+    $('mask').classList.add('opacity-0', 'pointer-events-none');
+    $('mask').classList.remove('opacity-100');
+    $('mask').setAttribute('aria-hidden', 'true');
+  }
+
+  // Зсув годинника запобігає вигоранню пікселів
+  function shiftMaskClock() {
+    const clock = $('mask-clock');
+    const maxTop = Math.max(window.innerHeight - 60, 0);
+    const maxLeft = Math.max(window.innerWidth - 100, 0);
+    clock.style.top = `${Math.floor(Math.random() * maxTop)}px`;
+    clock.style.left = `${Math.floor(Math.random() * maxLeft)}px`;
+  }
+
+  function armMask() {
+    clearTimeout(state.maskIdleId);
+    if (!state.session || state.session.mode !== 'night' || state.tab !== 'night') return;
+    state.maskIdleId = setTimeout(showMask, MASK_IDLE_MS);
+    if (!state.maskShiftId) state.maskShiftId = setInterval(shiftMaskClock, MASK_SHIFT_MS);
+  }
+
+  function disarmMask() {
+    clearTimeout(state.maskIdleId);
+    clearInterval(state.maskShiftId);
+    state.maskShiftId = null;
+    hideMask();
+  }
+
+  function onUserActivity() {
+    if ($('mask').getAttribute('aria-hidden') === 'false') hideMask();
+    armMask();
+  }
+
+  /* ---------- Вкладки ---------- */
+
+  function setTab(tab) {
+    state.tab = tab;
+    document.body.dataset.tab = tab;
+    for (const name of ['night', 'day', 'reports']) {
+      const active = name === tab;
+      $(`tab-${name}`).classList.toggle('hidden', !active);
+      const btn = $(`btn-${name}`);
+      btn.setAttribute('aria-selected', String(active));
+      btn.classList.remove(...TAB_ACTIVE, ...TAB_IDLE);
+      btn.classList.add(...(active ? TAB_ACTIVE : TAB_IDLE));
+    }
+    document.querySelector('meta[name="theme-color"]').content = tab === 'night' ? '#000000' : '#07070a';
+    if (tab === 'reports') renderReports();
+    if (tab === 'night') armMask(); else disarmMask();
+  }
+
+  /* ---------- Звіти ---------- */
+
+  function renderReports() {
+    const list = loadSessions();
+    const total = list.reduce((sum, s) => sum + s.seconds, 0);
+    $('stat-count').textContent = String(list.length);
+    $('stat-total').textContent = formatDuration(total);
+    $('stat-failsafe').textContent = String(list.filter((s) => s.endedBy === 'failsafe').length);
+    $('report-empty').classList.toggle('hidden', list.length > 0);
+    $('report-clear').classList.toggle('hidden', list.length === 0);
+
+    const ul = $('report-list');
+    ul.replaceChildren(...[...list].reverse().map(buildReportRow));
+  }
+
+  function buildReportRow(session) {
+    const li = document.createElement('li');
+    li.className = 'surface flex items-center justify-between rounded-2xl border border-zinc-800 bg-ink-900 px-4 py-3';
+
+    const left = document.createElement('div');
+    const title = document.createElement('p');
+    title.className = 'text-sm text-zinc-200';
+    title.textContent = session.mode === 'night' ? 'Ніч' : 'День';
+    const date = document.createElement('p');
+    date.className = 'text-xs text-zinc-500';
+    date.textContent = new Date(session.start).toLocaleString('uk-UA', {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+    left.append(title, date);
+
+    const right = document.createElement('div');
+    right.className = 'text-right';
+    const dur = document.createElement('p');
+    dur.className = 'text-sm tabular-nums text-zinc-200';
+    dur.textContent = formatDuration(session.seconds);
+    right.append(dur);
+    if (session.endedBy === 'failsafe') {
+      const badge = document.createElement('p');
+      badge.className = 'text-xs text-red-400';
+      badge.textContent = 'Зупинено Fail-Safe';
+      right.append(badge);
+    }
+
+    li.append(left, right);
+    return li;
+  }
+
+  /* ---------- Ініціалізація ---------- */
+
+  function init() {
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => setTab(btn.dataset.tab));
+    });
+    for (const mode of ['night', 'day']) {
+      $(`${mode}-toggle`).addEventListener('click', () => {
+        if (state.session) stopSession('user'); else startSession(mode);
+      });
+    }
+    $('output-action').addEventListener('click', onOutputAction);
+    $('report-clear').addEventListener('click', () => {
+      if (window.confirm('Видалити всю історію сесій?')) {
+        saveSessions([]);
+        renderReports();
+      }
+    });
+    ['pointerdown', 'keydown', 'touchstart'].forEach((evt) => {
+      document.addEventListener(evt, onUserActivity, { passive: true });
+    });
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', refreshOutput);
+    }
+
+    setTab('night');
+    renderSession();
+    renderReports();
+    refreshOutput();
+  }
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').catch((err) => {
+      console.error('VIO: service worker не зареєстровано', err);
+    });
+  }
+
+  init();
+  registerServiceWorker();
+})();
+</script>
+</body>
+</html>
