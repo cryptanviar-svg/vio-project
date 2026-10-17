@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'vio-v1.4.3';
+const CACHE_VERSION = 'vio-v1.4.4';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const TAILWIND_HOST = 'cdn.tailwindcss.com';
 
@@ -25,7 +25,7 @@ async function putInCache(request, response) {
   await cache.put(request, response);
 }
 
-// Спершу мережа, при збої — кеш (щоб оболонка застосунку оновлювалась)
+// РЎРїРµСЂС€Сѓ РјРµСЂРµР¶Р°, РїСЂРё Р·Р±РѕС— вЂ” РєРµС€ (С‰РѕР± РѕР±РѕР»РѕРЅРєР° Р·Р°СЃС‚РѕСЃСѓРЅРєСѓ РѕРЅРѕРІР»СЋРІР°Р»Р°СЃСЊ)
 async function networkFirst(request) {
   try {
     const response = await fetch(request);
@@ -38,7 +38,7 @@ async function networkFirst(request) {
   }
 }
 
-// Миттєво з кешу, фонове оновлення (для Tailwind CDN; відповідь може бути opaque)
+// РњРёС‚С‚С”РІРѕ Р· РєРµС€Сѓ, С„РѕРЅРѕРІРµ РѕРЅРѕРІР»РµРЅРЅСЏ (РґР»СЏ Tailwind CDN; РІС–РґРїРѕРІС–РґСЊ РјРѕР¶Рµ Р±СѓС‚Рё opaque)
 async function staleWhileRevalidate(request) {
   const cached = await caches.match(request);
   const refresh = fetch(request)

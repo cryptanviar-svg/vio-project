@@ -50,13 +50,20 @@
          class="mx-auto flex max-w-xl items-center gap-3 px-4 py-3">
       <span id="output-dot" class="h-2.5 w-2.5 shrink-0 rounded-full bg-zinc-600"></span>
       <div class="min-w-0 flex-1">
-        <p class="text-[11px] uppercase tracking-widest text-zinc-500">Аудіовихід</p>
+        <p class="text-[11px] uppercase tracking-widest text-zinc-200">Аудіовихід</p>
         <p id="output-label" class="truncate text-sm font-medium text-zinc-200">Перевірка…</p>
       </div>
       <button id="output-action" type="button"
               class="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 active:bg-zinc-900">
         Перевірити
       </button>
+    </div>
+    <div id="bt-banner" role="alert" class="hidden bg-red-950 text-red-200">
+      <div class="mx-auto flex max-w-xl items-center justify-between gap-3 px-4 py-2 text-xs">
+        <p>Нічну сесію можна почати лише з Bluetooth-гарнітурою</p>
+        <button id="bt-banner-close" type="button" aria-label="Закрити повідомлення"
+                class="shrink-0 rounded-md px-2 py-1 text-base leading-none active:bg-red-900">✕</button>
+      </div>
     </div>
     <p id="output-alert" role="alert" class="hidden bg-red-950 px-4 py-2 text-center text-xs text-red-200"></p>
   </header>
@@ -68,13 +75,18 @@
       <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-6">
         <p class="accent text-xs uppercase tracking-widest text-gold-400">Нічний режим</p>
         <p id="night-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
-        <p id="night-status" class="mt-2 text-center text-sm text-zinc-500">Сесію не запущено</p>
+        <p id="night-status" class="mt-2 text-center text-sm text-zinc-400">Сесію не запущено</p>
         <button id="night-toggle" type="button"
                 class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
           Почати нічну сесію
         </button>
+        <button id="sim-toggle" type="button"
+                class="mt-3 w-full rounded-xl border border-zinc-700 py-2.5 text-xs text-zinc-300 active:bg-zinc-900 disabled:opacity-40">
+          🧪 Симулювати атаку хропіння
+        </button>
+        <p id="sim-status" aria-live="polite" class="mt-2 text-center text-xs text-zinc-400"></p>
       </div>
-      <p class="px-2 text-xs leading-relaxed text-zinc-600">
+      <p class="px-2 text-xs leading-relaxed text-zinc-400">
         Нічна сесія стартує лише з Bluetooth-гарнітурою й слухає мікрофон: хропіння запускає кліки
         (Рефлекс 1), а при тривалому хропінні — наростаючий тон і вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
         звук і вібрація перейдуть на динамік смартфона, подію буде записано в «Звіти».
@@ -94,12 +106,12 @@
              class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
           <div id="tone-fill" class="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all duration-500" style="width:0%"></div>
         </div>
-        <p id="tone-note" class="mt-3 text-xs text-zinc-500">Кожна завершена вправа додає +5%</p>
+        <p id="tone-note" class="mt-3 text-xs text-zinc-400">Вправа додає +1%, якщо кут і амплітуда були в нормі весь час</p>
       </div>
 
       <ul id="exercise-list" class="space-y-2"></ul>
 
-      <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-4">
+      <div id="cam-card" class="surface scroll-mt-24 rounded-3xl border border-zinc-800 bg-ink-900 p-4">
         <div class="flex items-center justify-between px-2 pb-3">
           <p class="accent text-xs uppercase tracking-widest text-gold-400">Face-Tracking · симуляція</p>
           <button id="cam-toggle" type="button"
@@ -111,25 +123,39 @@
           <video id="cam-video" class="h-full w-full object-cover" style="transform:scaleX(-1)"
                  autoplay playsinline muted></video>
           <canvas id="cam-canvas" class="absolute inset-0 h-full w-full"></canvas>
-          <p id="cam-placeholder" class="absolute inset-0 flex items-center justify-center text-sm text-zinc-600">Камера вимкнена</p>
+          <p id="cam-placeholder" class="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">Камера вимкнена</p>
+          <p id="cam-countdown" class="absolute right-3 top-3 hidden rounded-lg bg-black/70 px-3 py-1 text-lg tabular-nums text-white"></p>
         </div>
-        <div id="cam-status" aria-live="polite" class="mt-3 grid grid-cols-2 gap-3 px-2 text-sm text-zinc-300">
-          <p id="cam-angle">Кут нахилу: —</p>
-          <p id="cam-amp">Амплітуда: —</p>
+        <div id="cam-status" aria-live="polite" class="mt-3 space-y-2 px-2 text-sm">
+          <p>
+            <span id="cam-angle" class="font-medium text-white">Кут нахилу: —</span>
+            <span class="text-xs text-zinc-400">(Тримайте голову рівно, норма до 5°)</span>
+          </p>
+          <p>
+            <span id="cam-amp" class="font-medium text-white">Амплітуда: —</span>
+            <span class="text-xs text-zinc-400">(Рівень відкриття рота / напруги м'язів під час вправи)</span>
+          </p>
         </div>
-        <p id="cam-note" class="mt-2 px-2 text-xs text-zinc-600">Відео обробляється лише на пристрої, нікуди не надсилається.</p>
+        <p id="cam-note" class="mt-2 px-2 text-xs text-zinc-400">Відео обробляється лише на пристрої, нікуди не надсилається.</p>
       </div>
 
       <div class="surface rounded-3xl border border-zinc-800 bg-gradient-to-b from-ink-800 to-ink-900 p-6">
-        <p class="accent text-xs uppercase tracking-widest text-gold-400">Денний режим</p>
-        <p id="day-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
-        <p id="day-status" class="mt-2 text-center text-sm text-zinc-500">Сесію не запущено</p>
-        <button id="day-toggle" type="button"
-                class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
-          Почати денну сесію
-        </button>
+        <p class="accent text-xs uppercase tracking-widest text-gold-400">Денний режим: Таймер</p>
+        <p id="ex-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:30</p>
+        <p id="ex-status" aria-live="polite" class="mt-2 text-center text-sm text-zinc-300">Оберіть вправу й натисніть «Старт»</p>
+        <div class="mt-6 border-t border-zinc-800 pt-4">
+          <div class="flex items-baseline justify-between">
+            <p class="text-xs uppercase tracking-widest text-zinc-200">Денна сесія</p>
+            <p id="day-timer" class="text-2xl font-light tabular-nums text-zinc-100">00:00</p>
+          </div>
+          <p id="day-status" class="mt-2 text-center text-sm text-zinc-400">Сесію не запущено</p>
+          <button id="day-toggle" type="button"
+                  class="btn-primary mt-4 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
+            Почати денну сесію
+          </button>
+        </div>
       </div>
-      <p class="px-2 text-xs leading-relaxed text-zinc-600">
+      <p class="px-2 text-xs leading-relaxed text-zinc-400">
         Удень дозволені обидва виходи: гарнітура й динамік смартфона.
       </p>
     </section>
@@ -138,23 +164,23 @@
     <section id="tab-reports" role="tabpanel" aria-labelledby="btn-reports" class="hidden space-y-4">
       <div class="grid grid-cols-3 gap-3">
         <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
-          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Сесій</p>
+          <p class="text-[11px] uppercase tracking-widest text-zinc-200">Сесій</p>
           <p id="stat-count" class="mt-2 text-2xl font-light text-zinc-100">0</p>
         </div>
         <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
-          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Разом</p>
+          <p class="text-[11px] uppercase tracking-widest text-zinc-200">Разом</p>
           <p id="stat-total" class="mt-2 text-2xl font-light text-zinc-100">0 хв</p>
         </div>
         <div class="surface rounded-2xl border border-zinc-800 bg-ink-900 p-4">
-          <p class="text-[11px] uppercase tracking-widest text-zinc-500">Fail-Safe</p>
+          <p class="text-[11px] uppercase tracking-widest text-zinc-200">Fail-Safe</p>
           <p id="stat-failsafe" class="mt-2 text-2xl font-light text-zinc-100">0</p>
         </div>
       </div>
       <ul id="report-list" class="space-y-2"></ul>
-      <p id="report-empty" class="py-8 text-center text-sm text-zinc-600">Поки що немає завершених сесій</p>
-      <h2 class="pt-2 text-xs uppercase tracking-widest text-zinc-500">Журнал подій</h2>
+      <p id="report-empty" class="py-8 text-center text-sm text-zinc-400">Поки що немає завершених сесій</p>
+      <h2 class="pt-2 text-xs uppercase tracking-widest text-zinc-200">Журнал подій</h2>
       <ul id="log-list" class="space-y-1.5"></ul>
-      <p id="log-empty" class="py-4 text-center text-sm text-zinc-600">Подій поки немає</p>
+      <p id="log-empty" class="py-4 text-center text-sm text-zinc-400">Подій поки немає</p>
       <button id="report-clear" type="button"
               class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-400 active:bg-zinc-900">
         Очистити історію
@@ -260,6 +286,73 @@ const VioAudio = (() => {
   return { getContext, unlock };
 })();
 
+/* Реакції біофідбеку: спільні для двигуна та інженерного тесту (час `at` — за годинником AudioContext) */
+const SIM_CONFIG = Object.freeze({
+  TONE_MS: 3000,
+  TONE_MAX_GAIN: 0.2,
+  VIBRATION_PATTERN: Object.freeze([200, 100, 200])
+});
+
+function emitClick(context, destination, at = context.currentTime) {
+  const C = ENGINE_CONFIG;
+  const end = at + C.CLICK_MS / 1000;
+  const osc = context.createOscillator();
+  const gain = context.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = C.CLICK_HZ;
+  gain.gain.setValueAtTime(C.CLICK_GAIN, at);
+  gain.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(gain).connect(destination);
+  osc.start(at);
+  osc.stop(end + 0.005);
+}
+
+function emitRisingTone(context, destination, rampSeconds, maxGain, at = context.currentTime) {
+  const C = ENGINE_CONFIG;
+  const osc = context.createOscillator();
+  const gain = context.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(C.TONE_MIN_HZ, at);
+  osc.frequency.linearRampToValueAtTime(C.TONE_MAX_HZ, at + rampSeconds);
+  gain.gain.setValueAtTime(C.TONE_START_GAIN, at);
+  gain.gain.linearRampToValueAtTime(maxGain, at + rampSeconds);
+  osc.connect(gain).connect(destination);
+  osc.start(at);
+  return { osc, gain };
+}
+
+function releaseTone(context, tone) {
+  const t = context.currentTime;
+  const param = tone.gain.gain;
+  const current = param.value;
+  param.cancelScheduledValues(t);
+  param.setValueAtTime(current, t);
+  param.setTargetAtTime(0, t, ENGINE_CONFIG.TONE_RELEASE_S);
+  tone.osc.stop(t + 1);
+}
+
+/* Інженерний тест: хропіння 3 с без мікрофона — Рефлекс 1 (кліки), а після 2.5 с — Рефлекс 2 (тон і вібрація) */
+async function simulateSnoreAttack() {
+  const C = ENGINE_CONFIG;
+  const context = await VioAudio.unlock();
+  if (!context) throw new Error('Web Audio API недоступний у цьому браузері.');
+  if (context.state !== 'running') throw new Error('Браузер заблокував звук. Торкніться кнопки ще раз.');
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const startAt = context.currentTime + 0.05;
+  const clickCount = Math.ceil(C.REFLEX2_AFTER_MS / C.CLICK_INTERVAL_MS);
+  for (let i = 0; i < clickCount; i++) {
+    emitClick(context, context.destination, startAt + (i * C.CLICK_INTERVAL_MS) / 1000);
+  }
+  const tone = emitRisingTone(context, context.destination, SIM_CONFIG.TONE_MS / 1000,
+    SIM_CONFIG.TONE_MAX_GAIN, startAt + C.REFLEX2_AFTER_MS / 1000);
+  await wait(C.REFLEX2_AFTER_MS);
+  const isVibrated = typeof navigator.vibrate === 'function' && navigator.vibrate(SIM_CONFIG.VIBRATION_PATTERN);
+  await wait(SIM_CONFIG.TONE_MS);
+  releaseTone(context, tone);
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
+  return { isVibrated };
+}
+
 function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
@@ -286,43 +379,18 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   /* ---------- Реакції ---------- */
 
   function playClick() {
-    const t = ctx.currentTime;
-    const end = t + C.CLICK_MS / 1000;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = C.CLICK_HZ;
-    gain.gain.setValueAtTime(C.CLICK_GAIN, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, end);
-    osc.connect(gain).connect(master);
-    osc.start(t);
-    osc.stop(end + 0.005);
+    emitClick(ctx, master);
   }
 
   function startReflex2(now) {
-    const t = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(C.TONE_MIN_HZ, t);
-    osc.frequency.linearRampToValueAtTime(C.TONE_MAX_HZ, t + C.TONE_RAMP_S);
-    gain.gain.setValueAtTime(C.TONE_START_GAIN, t);
-    gain.gain.linearRampToValueAtTime(C.TONE_MAX_GAIN, t + C.TONE_RAMP_S);
-    osc.connect(gain).connect(master);
-    osc.start(t);
+    const { osc, gain } = emitRisingTone(ctx, master, C.TONE_RAMP_S, C.TONE_MAX_GAIN);
     setStatus('Хропіння триває — Рефлекс 2');
     onLog('Хропіння понад 2.5 с — Рефлекс 2: наростаючий тон 150–250 Гц і вібрація');
     return { startedAt: now, osc, gain, nextVibAt: now };
   }
 
   function stopReflex2(reflex) {
-    const t = ctx.currentTime;
-    const param = reflex.gain.gain;
-    const current = param.value;
-    param.cancelScheduledValues(t);
-    param.setValueAtTime(current, t);
-    param.setTargetAtTime(0, t, C.TONE_RELEASE_S);
-    reflex.osc.stop(t + 1);
+    releaseTone(ctx, reflex);
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
   }
 
@@ -551,21 +619,24 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const MASK_IDLE_MS = 10000;
   const MASK_SHIFT_MS = 60000;
   const MAX_STORED_SESSIONS = 200;
+  const EVENTS_KEY = 'vio.events';
+  const MAX_STORED_EVENTS = 200;
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
 
   const OUTPUT = {
-    bluetooth: { text: 'Bluetooth-гарнітура', dot: 'bg-emerald-400' },
-    speaker: { text: 'Динамік смартфона', dot: 'bg-amber-400' },
-    unknown: { text: 'Невизначено (вважається динаміком)', dot: 'bg-zinc-600' }
+    bluetooth: { text: '🎧 Bluetooth-гарнітура', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
+    speaker: { text: '📱 Динамік смартфона (Резерв)', dot: 'bg-orange-400', tone: 'text-orange-300' },
+    unknown: { text: 'Невизначено (вважається динаміком)', dot: 'bg-zinc-600', tone: 'text-zinc-200' }
   };
   const TAB_ACTIVE = ['text-gold-400', 'font-semibold'];
-  const TAB_IDLE = ['text-zinc-500'];
+  const TAB_IDLE = ['text-zinc-400'];
 
   const $ = (id) => document.getElementById(id);
   const state = {
     tab: 'night',
     output: 'unknown',
     manualHeadset: false,
+    isBannerDismissed: false,
     session: null,
     engine: null,
     wakeLock: null,
@@ -616,6 +687,25 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     }
   }
 
+  function loadStandaloneEvents() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed.filter(isValidEvent) : [];
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати журнал подій', err);
+      return [];
+    }
+  }
+
+  function saveStandaloneEvents(list) {
+    try {
+      localStorage.setItem(EVENTS_KEY, JSON.stringify(list.slice(-MAX_STORED_EVENTS)));
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти журнал подій', err);
+      showAlert('Не вдалося зберегти подію: сховище недоступне.');
+    }
+  }
+
   /* ---------- Утиліти ---------- */
 
   function formatClock(totalSeconds) {
@@ -643,7 +733,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.label);
-      if (outputs.length === 0) return 'unknown';
+      if (outputs.length === 0) {
+        // Мобільний Chrome часто не показує виходи: після дозволу дивимось на мітки мікрофонів (гарнітура додає свій)
+        const inputs = devices.filter((d) => d.kind === 'audioinput' && d.label);
+        if (inputs.length === 0) return 'unknown';
+        return inputs.some((d) => BLUETOOTH_PATTERN.test(d.label)) ? 'bluetooth' : 'speaker';
+      }
       const active = outputs.find((d) => d.deviceId === 'default') || outputs[0];
       return BLUETOOTH_PATTERN.test(active.label) ? 'bluetooth' : 'speaker';
     } catch (err) {
@@ -660,10 +755,17 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     const kind = effectiveOutput();
     const info = OUTPUT[kind];
     $('output-label').textContent = state.manualHeadset && state.output === 'unknown'
-      ? 'Bluetooth-гарнітура (підтверджено вручну)' : info.text;
+      ? '🎧 Bluetooth-гарнітура (підтверджено вручну)' : info.text;
+    $('output-label').className = `truncate text-sm font-medium ${info.tone}`;
     $('output-dot').className = `h-2.5 w-2.5 shrink-0 rounded-full ${info.dot}`;
-    $('output-action').textContent = state.output === 'unknown' && !state.manualHeadset
-      ? 'Підтвердити' : 'Перевірити';
+    if (kind === 'bluetooth') state.isBannerDismissed = false;
+    renderSession();
+  }
+
+  // Червона плашка видна, поки нічну сесію почати не можна; ✕ ховає її вручну
+  function renderBanner() {
+    const isShown = !state.session && effectiveOutput() !== 'bluetooth' && !state.isBannerDismissed;
+    $('bt-banner').classList.toggle('hidden', !isShown);
   }
 
   async function refreshOutput() {
@@ -686,23 +788,50 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     }
   }
 
+  // Спершу дозвіл на мікрофон (інакше мобільні браузери віддають порожній список пристроїв), потім перевірка
   async function onOutputAction() {
-    if (state.output === 'unknown' && !state.manualHeadset) {
+    const button = $('output-action');
+    button.disabled = true;
+    button.textContent = 'Перевірка…';
+    try {
       const granted = await requestDeviceLabels();
+      state.manualHeadset = false;
       await refreshOutput();
       if (state.output === 'unknown') {
-        const confirmed = window.confirm(
+        state.manualHeadset = window.confirm(
           granted
             ? 'Браузер не показує тип аудіовиходу. Гарнітура Bluetooth підключена?'
             : 'Немає доступу до списку пристроїв. Гарнітура Bluetooth підключена?'
         );
-        state.manualHeadset = confirmed;
         renderOutput();
       }
-      return;
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Перевірити';
     }
-    state.manualHeadset = false;
-    await refreshOutput();
+  }
+
+  /* ---------- Інженерний тест хропіння ---------- */
+
+  async function onSimulate() {
+    const button = $('sim-toggle');
+    button.disabled = true;
+    $('sim-status').textContent = 'Симуляція: Рефлекс 1 (кліки) → Рефлекс 2 (тон і вібрація)…';
+    let text;
+    try {
+      const { isVibrated } = await simulateSnoreAttack();
+      text = isVibrated
+        ? 'Симуляція хропіння. Імпульс надіслано успішно'
+        : 'Симуляція хропіння. Звуковий імпульс надіслано; вібрація недоступна на цьому пристрої';
+    } catch (err) {
+      console.error('VIO: помилка симуляції хропіння', err);
+      text = `Симуляція хропіння не вдалася: ${err.message}`;
+    } finally {
+      button.disabled = false;
+    }
+    saveStandaloneEvents([...loadStandaloneEvents(), { t: Date.now(), text }]);
+    $('sim-status').textContent = text;
+    renderReports();
   }
 
   // Втрата Bluetooth не зупиняє сесію: звук і вібрація йдуть на вбудований динамік (резерв)
@@ -866,13 +995,16 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     for (const mode of ['night', 'day']) {
       const active = Boolean(s) && s.mode === mode;
       const blocked = Boolean(s) && s.mode !== mode;
+      const needsBluetooth = mode === 'night' && !s && effectiveOutput() !== 'bluetooth';
       const label = mode === 'night' ? 'нічну' : 'денну';
       $(`${mode}-timer`).textContent = formatClock(active ? s.seconds : 0);
-      $(`${mode}-status`).textContent = active ? (s.status || 'Сесія триває') : blocked ? 'Іншу сесію запущено' : 'Сесію не запущено';
+      $(`${mode}-status`).textContent = active ? (s.status || 'Сесія триває') : blocked ? 'Іншу сесію запущено'
+        : needsBluetooth ? 'Підключіть Bluetooth-гарнітуру й натисніть «Перевірити»' : 'Сесію не запущено';
       $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : `Почати ${label} сесію`;
-      $(`${mode}-toggle`).disabled = blocked;
-      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked);
+      $(`${mode}-toggle`).disabled = blocked || needsBluetooth;
+      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsBluetooth);
     }
+    renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
   }
 
@@ -948,11 +1080,11 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     const live = state.session ? [state.session] : [];
     const withLive = [...list, ...live];
     $('stat-failsafe').textContent = String(withLive.reduce((sum, s) => sum + s.fallbacks, 0));
-    const events = withLive.flatMap((s) => s.events).sort((a, b) => b.t - a.t).slice(0, MAX_LOG_ROWS);
+    const events = [...withLive.flatMap((s) => s.events), ...loadStandaloneEvents()].sort((a, b) => b.t - a.t).slice(0, MAX_LOG_ROWS);
     $('log-empty').classList.toggle('hidden', events.length > 0);
     $('log-list').replaceChildren(...events.map(buildLogRow));
     $('report-empty').classList.toggle('hidden', list.length > 0);
-    $('report-clear').classList.toggle('hidden', list.length === 0);
+    $('report-clear').classList.toggle('hidden', list.length === 0 && loadStandaloneEvents().length === 0);
 
     const ul = $('report-list');
     ul.replaceChildren(...[...list].reverse().map(buildReportRow));
@@ -962,10 +1094,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     const li = document.createElement('li');
     li.className = 'flex gap-3 text-xs leading-relaxed';
     const time = document.createElement('span');
-    time.className = 'shrink-0 tabular-nums text-zinc-600';
+    time.className = 'shrink-0 tabular-nums text-zinc-400';
     time.textContent = new Date(event.t).toLocaleTimeString('uk-UA');
     const text = document.createElement('span');
-    text.className = 'text-zinc-400';
+    text.className = 'text-zinc-300';
     text.textContent = event.text;
     li.append(time, text);
     return li;
@@ -980,7 +1112,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     title.className = 'text-sm text-zinc-200';
     title.textContent = session.mode === 'night' ? 'Ніч' : 'День';
     const date = document.createElement('p');
-    date.className = 'text-xs text-zinc-500';
+    date.className = 'text-xs text-zinc-400';
     date.textContent = new Date(session.start).toLocaleString('uk-UA', {
       day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
     });
@@ -1015,6 +1147,11 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       });
     }
     $('output-action').addEventListener('click', onOutputAction);
+    $('sim-toggle').addEventListener('click', onSimulate);
+    $('bt-banner-close').addEventListener('click', () => {
+      state.isBannerDismissed = true;
+      renderBanner();
+    });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && isNightSessionActive()) {
         acquireWakeLock();
@@ -1024,6 +1161,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     $('report-clear').addEventListener('click', () => {
       if (window.confirm('Видалити всю історію сесій?')) {
         saveSessions([]);
+        saveStandaloneEvents([]);
         renderReports();
       }
     });
@@ -1058,10 +1196,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   'use strict';
 
   const TONE_KEY = 'vio.tone';
-  const TONE_STEP = 5;
+  const TONE_STEP = 1;
   const TONE_MAX = 100;
-  const TONE_NOTE_DEFAULT = 'Кожна завершена вправа додає +5%';
-  const EXERCISE_SECONDS = 10;
+  const TONE_NOTE_DEFAULT = 'Вправа додає +1%, якщо кут і амплітуда були в нормі весь час';
+  const EXERCISE_SECONDS = 30;
   const EXERCISE_MS = EXERCISE_SECONDS * 1000;
   const EXERCISE_TICK_MS = 100;
   const DONE_FLASH_MS = 1000;
@@ -1083,6 +1221,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const MARK_JITTER = 0.012;
   const MARK_RADIUS_PX = 4;
   const MAX_TILT_DEG = 4;
+  const TILT_NORM_DEG = 5;
+  const AMPLITUDE_NORM_MIN = 85;
   const AMPLITUDE_MIN = 90;
   const AMPLITUDE_MAX = 99;
   const GRID_DIVISIONS = 4;
@@ -1093,6 +1233,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const exerciseUi = new Map();
   let tone = 0;
   let running = null;
+  let runCounter = 0;
   const cam = { stream: null, attempt: 0, trackId: null, marks: [] };
 
   function el(tag, className, text) {
@@ -1192,7 +1333,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   function buildExerciseRow(exercise) {
     const li = el('li', 'surface flex items-center gap-4 rounded-2xl border border-zinc-800 bg-ink-900 p-4');
     const info = el('div', 'min-w-0 flex-1');
-    info.append(el('p', 'text-sm text-zinc-200', exercise.name), el('p', 'mt-1 text-xs text-zinc-500', exercise.hint));
+    info.append(el('p', 'text-sm text-zinc-200', exercise.name), el('p', 'mt-1 text-xs text-zinc-400', exercise.hint));
     const button = el('button', 'relative h-16 w-16 shrink-0 rounded-full bg-zinc-900 text-sm font-semibold text-gold-400 active:opacity-80 disabled:opacity-40');
     button.type = 'button';
     const { svg, progress } = createRing();
@@ -1204,48 +1345,89 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return li;
   }
 
+  function formatCountdown(ms) {
+    const seconds = Math.max(0, Math.ceil(ms / 1000));
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+
+  function setExerciseStatus(text) {
+    $('ex-status').textContent = text;
+  }
+
+  // Відлік іде лише після старту камери: до того startedAt === null і кнопка показує «…»
+  function isCounting() {
+    return Boolean(running) && running.startedAt !== null;
+  }
+
   function renderExercises() {
-    const elapsed = running ? Date.now() - running.startedAt : 0;
+    const elapsed = isCounting() ? Date.now() - running.startedAt : 0;
     exerciseUi.forEach((ui, id) => {
       const isActive = Boolean(running) && running.id === id;
-      const progress = isActive ? Math.min(1, elapsed / EXERCISE_MS) : 1;
+      const progress = isActive && isCounting() ? Math.min(1, elapsed / EXERCISE_MS) : 1;
       ui.progress.style.strokeDashoffset = String(RING_LENGTH * progress);
-      ui.label.textContent = isActive ? String(Math.max(1, Math.ceil((EXERCISE_MS - elapsed) / 1000))) : 'Старт';
+      ui.label.textContent = !isActive ? 'Старт'
+        : isCounting() ? String(Math.max(1, Math.ceil((EXERCISE_MS - elapsed) / 1000))) : '…';
       ui.button.disabled = Boolean(running) && !isActive;
       ui.button.setAttribute('aria-label', `${isActive ? 'Скасувати' : 'Старт'}: ${ui.name}`);
     });
+    const remaining = isCounting() ? EXERCISE_MS - elapsed : EXERCISE_MS;
+    $('ex-timer').textContent = formatCountdown(remaining);
+    $('cam-countdown').textContent = formatCountdown(remaining);
+    $('cam-countdown').classList.toggle('hidden', !isCounting());
   }
 
   function cancelExercise() {
     if (!running) return;
     clearInterval(running.timerId);
     running = null;
+    setExerciseStatus('Вправу скасовано');
     renderExercises();
   }
 
+  // Тонус зараховується лише якщо кут і амплітуда були в нормі в усіх замірах за 30 с
   function completeExercise() {
-    const { id, timerId } = running;
+    const { id, timerId, isNormal, samples } = running;
     clearInterval(timerId);
     running = null;
+    renderExercises();
+    if (!isNormal || samples === 0) {
+      setExerciseStatus('Не зараховано: кут нахилу або амплітуда виходили за норму');
+      return;
+    }
     addTone();
     playSuccessSound();
-    renderExercises();
+    setExerciseStatus(`Зараховано: тонус +${TONE_STEP}%`);
     exerciseUi.get(id).label.textContent = '✓';
     setTimeout(() => { if (!running) renderExercises(); }, DONE_FLASH_MS);
   }
 
   function tickExercise() {
-    if (!running) return;
+    if (!isCounting()) return;
     if (Date.now() - running.startedAt >= EXERCISE_MS) completeExercise();
     else renderExercises();
   }
 
-  function onExerciseClick(id) {
+  async function onExerciseClick(id) {
     if (running) {
       if (running.id === id) cancelExercise();
       return;
     }
-    running = { id, startedAt: Date.now(), timerId: setInterval(tickExercise, EXERCISE_TICK_MS) };
+    const runId = ++runCounter;
+    running = { id, runId, startedAt: null, timerId: null, isNormal: true, samples: 0 };
+    setExerciseStatus('Вмикаю камеру…');
+    renderExercises();
+    $('cam-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const isCameraOn = await startCamera();
+    if (!running || running.runId !== runId) return;
+    if (!isCameraOn) {
+      running = null;
+      setExerciseStatus('Вправу не розпочато: для відстеження потрібна камера');
+      renderExercises();
+      return;
+    }
+    running = { ...running, startedAt: Date.now(), timerId: setInterval(tickExercise, EXERCISE_TICK_MS) };
+    setExerciseStatus('Тримайте голову рівно й виконуйте вправу');
+    analyzeJaw();
     renderExercises();
   }
 
@@ -1317,13 +1499,21 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     drawOverlay();
   }
 
-  function analyzeJaw() {
-    const tilt = (Math.random() * MAX_TILT_DEG).toFixed(1);
+  // Єдина точка, яку треба замінити справжнім аналізом обличчя; зараз значення симулюються в межах норми
+  function readFaceMetrics() {
+    const tilt = Math.random() * MAX_TILT_DEG;
     const amplitude = AMPLITUDE_MIN + Math.floor(Math.random() * (AMPLITUDE_MAX - AMPLITUDE_MIN + 1));
+    return { tilt, amplitude, isNormal: tilt <= TILT_NORM_DEG && amplitude >= AMPLITUDE_NORM_MIN };
+  }
+
+  function analyzeJaw() {
+    const metrics = readFaceMetrics();
     cam.marks = buildMarks();
-    $('cam-angle').textContent = `Кут нахилу: OK (${tilt}°)`;
-    $('cam-amp').textContent = `Амплітуда: ${amplitude}%`;
+    $('cam-angle').textContent = `Кут нахилу: ${metrics.tilt <= TILT_NORM_DEG ? 'ОК' : 'поза нормою'} (${metrics.tilt.toFixed(1)}°)`;
+    $('cam-amp').textContent = `Амплітуда: ${metrics.amplitude}%`;
     drawOverlay();
+    if (!isCounting()) return;
+    running = { ...running, samples: running.samples + 1, isNormal: running.isNormal && metrics.isNormal };
   }
 
   function cameraErrorMessage(err) {
@@ -1352,10 +1542,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     drawOverlay();
   }
 
+  // Повертає true, якщо камера працює (вже була увімкнена або щойно запущена)
   async function startCamera() {
+    if (cam.stream) return true;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       $('cam-note').textContent = 'Цей браузер не дає доступу до камери.';
-      return;
+      return false;
     }
     const attempt = ++cam.attempt;
     let stream;
@@ -1364,14 +1556,14 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     } catch (err) {
       console.error('VIO: помилка getUserMedia (камера)', err);
       $('cam-note').textContent = cameraErrorMessage(err);
-      return;
+      return false;
     }
     if (attempt !== cam.attempt) {
       stream.getTracks().forEach((track) => track.stop());
-      return;
+      return false;
     }
     cam.stream = stream;
-    stream.getVideoTracks().forEach((track) => track.addEventListener('ended', stopCamera));
+    stream.getVideoTracks().forEach((track) => track.addEventListener('ended', stopActivities));
     $('cam-video').srcObject = stream;
     $('cam-video').play().catch((err) => console.error('VIO: відео не стартувало автоматично', err));
     $('cam-note').textContent = 'Відео обробляється лише на пристрої, нікуди не надсилається.';
@@ -1379,6 +1571,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     syncCanvasSize();
     analyzeJaw();
     cam.trackId = setInterval(analyzeJaw, TRACK_INTERVAL_MS);
+    return true;
   }
 
   /* ---------- Ініціалізація ---------- */
@@ -1395,7 +1588,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     renderExercises();
 
     $('cam-toggle').addEventListener('click', () => {
-      if (cam.stream) stopCamera(); else startCamera();
+      if (cam.stream) stopActivities(); else startCamera();
     });
     if (typeof ResizeObserver === 'function') new ResizeObserver(syncCanvasSize).observe($('cam-frame'));
     window.addEventListener('storage', (event) => {
