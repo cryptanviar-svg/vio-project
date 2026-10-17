@@ -87,8 +87,8 @@
         <p id="sim-status" aria-live="polite" class="mt-2 text-center text-xs text-zinc-300"></p>
       </div>
       <p class="px-2 text-xs leading-relaxed text-zinc-300">
-        Нічна сесія стартує лише з Bluetooth-гарнітурою й слухає мікрофон: хропіння запускає кліки
-        (Рефлекс 1), а при тривалому хропінні — наростаючий тон і вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
+        Нічна сесія слухає мікрофон: хропіння запускає серію кліків (Рефлекс 1), а при тривалому хропінні —
+        наростаючий гул і пульсуючу вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
         звук і вібрація перейдуть на динамік смартфона, подію буде записано в «Звіти».
         За бездіяльності екран маскується чорним для економії OLED.
       </p>
@@ -223,23 +223,27 @@ const ENGINE_CONFIG = Object.freeze({
   CONFIRM_MAX_MS: 2500,
   SAW_PEAK_RATIO: 0.5,
   EPISODE_GAP_MS: 4500,
-  REFLEX2_AFTER_MS: 2500,
-  REFLEX2_MAX_MS: 30000,
+  ATTACK_MAX_MS: 30000,
   LOCKOUT_MS: 10000,
   MASTER_GAIN: 1,
+  STAGE1_MS: 3000,
+  ATTACK_RAMP_S: 10,
   CLICK_HZ: 4000,
-  CLICK_MS: 8,
-  CLICK_GAIN: 0.2,
-  CLICK_INTERVAL_MS: 700,
-  TONE_MIN_HZ: 150,
-  TONE_MAX_HZ: 250,
-  TONE_START_GAIN: 0.02,
-  TONE_MAX_GAIN: 0.4,
-  TONE_RAMP_S: 10,
-  TONE_RELEASE_S: 0.15,
-  VIB_MIN_MS: 80,
-  VIB_MAX_MS: 500,
-  VIB_PAUSE_MS: 250
+  CLICK_ON_MS: 50,
+  CLICK_OFF_MS: 50,
+  CLICK_EDGE_S: 0.003,
+  CLICK_GAIN: 0.6,
+  HUM_MIN_HZ: 150,
+  HUM_MAX_HZ: 250,
+  HUM_START_GAIN: 0.2,
+  HUM_END_GAIN: 0.88,
+  HUM_FADE_IN_S: 0.03,
+  PULSE_HZ: 4,
+  PULSE_DEPTH: 0.3,
+  PULSE_BASE: 0.7,
+  RELEASE_S: 0.15,
+  VIB_ON_MS: 125,
+  VIB_OFF_MS: 125
 });
 
 /* Спільний AudioContext: мобільний WebKit блокує звук до жесту користувача, тож розблокування централізоване */
@@ -286,84 +290,101 @@ const VioAudio = (() => {
   return { getContext, unlock };
 })();
 
-/* Реакції біофідбеку: спільні для двигуна та інженерного тесту (час `at` — за годинником AudioContext) */
-const SIM_CONFIG = Object.freeze({
-  CLICKS_MS: 2000,
-  HUM_AT_MS: 2500,
-  TOTAL_MS: 3000,
-  HUM_HZ: 200,
-  HUM_GAIN: 0.2,
-  VIBRATION_PATTERN: Object.freeze([200, 100, 200])
-});
+/* Атака біофідбеку: спільна для двигуна та інженерного тесту (час — за годинником AudioContext).
+   Етап 1: кліки 4 кГц; етап 2: пульсуючий гул 150–250 Гц з ростом гучності до кінця ATTACK_RAMP_S */
+const SIM_TOTAL_MS = ENGINE_CONFIG.ATTACK_RAMP_S * 1000;
 
-function emitClick(context, destination, at = context.currentTime) {
+function scheduleClicks(context, destination, t0) {
   const C = ENGINE_CONFIG;
-  const end = at + C.CLICK_MS / 1000;
+  const onS = C.CLICK_ON_MS / 1000;
+  const stepS = (C.CLICK_ON_MS + C.CLICK_OFF_MS) / 1000;
+  const stage1S = C.STAGE1_MS / 1000;
   const osc = context.createOscillator();
   const gain = context.createGain();
   osc.type = 'sine';
   osc.frequency.value = C.CLICK_HZ;
-  gain.gain.setValueAtTime(C.CLICK_GAIN, at);
-  gain.gain.exponentialRampToValueAtTime(0.0001, end);
+  gain.gain.setValueAtTime(0, t0);
+  for (let at = t0; at + onS <= t0 + stage1S; at += stepS) {
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(C.CLICK_GAIN, at + C.CLICK_EDGE_S);
+    gain.gain.setValueAtTime(C.CLICK_GAIN, at + onS - C.CLICK_EDGE_S);
+    gain.gain.linearRampToValueAtTime(0, at + onS);
+  }
   osc.connect(gain).connect(destination);
-  osc.start(at);
-  osc.stop(end + 0.005);
+  osc.start(t0);
+  osc.stop(t0 + stage1S);
 }
 
-function emitRisingTone(context, destination, rampSeconds, maxGain, at = context.currentTime) {
+function scheduleHum(context, destination, t0) {
   const C = ENGINE_CONFIG;
-  const osc = context.createOscillator();
-  const gain = context.createGain();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(C.TONE_MIN_HZ, at);
-  osc.frequency.linearRampToValueAtTime(C.TONE_MAX_HZ, at + rampSeconds);
-  gain.gain.setValueAtTime(C.TONE_START_GAIN, at);
-  gain.gain.linearRampToValueAtTime(maxGain, at + rampSeconds);
-  osc.connect(gain).connect(destination);
-  osc.start(at);
-  return { osc, gain };
+  const t1 = t0 + C.STAGE1_MS / 1000;
+  const tEnd = t0 + C.ATTACK_RAMP_S;
+  const hum = context.createOscillator();
+  const humGain = context.createGain();
+  const pulse = context.createGain();
+  const lfo = context.createOscillator();
+  const lfoDepth = context.createGain();
+  hum.type = 'triangle';
+  hum.frequency.setValueAtTime(C.HUM_MIN_HZ, t1);
+  hum.frequency.linearRampToValueAtTime(C.HUM_MAX_HZ, tEnd);
+  humGain.gain.setValueAtTime(0.0001, t1);
+  humGain.gain.linearRampToValueAtTime(C.HUM_START_GAIN, t1 + C.HUM_FADE_IN_S);
+  humGain.gain.linearRampToValueAtTime(C.HUM_END_GAIN, tEnd);
+  pulse.gain.value = C.PULSE_BASE;
+  lfo.type = 'sine';
+  lfo.frequency.value = C.PULSE_HZ;
+  lfoDepth.gain.value = C.PULSE_DEPTH;
+  lfo.connect(lfoDepth).connect(pulse.gain);
+  hum.connect(humGain).connect(pulse).connect(destination);
+  hum.start(t1);
+  lfo.start(t1);
+  return { hum, lfo };
 }
 
-function releaseTone(context, tone) {
-  const t = context.currentTime;
-  const param = tone.gain.gain;
-  const current = param.value;
-  param.cancelScheduledValues(t);
-  param.setValueAtTime(current, t);
-  param.setTargetAtTime(0, t, ENGINE_CONFIG.TONE_RELEASE_S);
-  tone.osc.stop(t + 1);
+// Запускає повну атаку; stop() плавно гасить звук (гул тримається на піку, доки його не зупинено)
+function startAttack(context, destination) {
+  const t0 = context.currentTime + 0.02;
+  const out = context.createGain();
+  out.connect(destination);
+  scheduleClicks(context, out, t0);
+  const { hum, lfo } = scheduleHum(context, out, t0);
+  return {
+    stop() {
+      const t = context.currentTime;
+      out.gain.cancelScheduledValues(t);
+      out.gain.setValueAtTime(out.gain.value, t);
+      out.gain.setTargetAtTime(0, t, ENGINE_CONFIG.RELEASE_S);
+      hum.stop(t + 1);
+      lfo.stop(t + 1);
+    }
+  };
 }
 
-/* Інженерний тест: хропіння 3 с без мікрофона — Рефлекс 1 (кліки), а після 2.5 с — Рефлекс 2 (тон і вібрація) */
+// Патерн вібрації в такт гулу: [імпульс, пауза, імпульс, пауза, …] на durationMs
+function buildVibrationPattern(durationMs) {
+  const C = ENGINE_CONFIG;
+  const pairs = Math.max(1, Math.floor(durationMs / (C.VIB_ON_MS + C.VIB_OFF_MS)));
+  return Array.from({ length: pairs * 2 }, (_, i) => (i % 2 === 0 ? C.VIB_ON_MS : C.VIB_OFF_MS));
+}
+
+/* Інженерний тест: повна атака без мікрофона — кліки 3 с, далі гул і вібрація до кінця ATTACK_RAMP_S */
 async function simulateSnoreAttack() {
   const C = ENGINE_CONFIG;
   const context = await VioAudio.unlock();
   if (!context) throw new Error('Web Audio API недоступний у цьому браузері.');
   if (context.state !== 'running') throw new Error('Браузер заблокував звук. Торкніться кнопки ще раз.');
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const startAt = context.currentTime + 0.05;
-  const clickCount = Math.ceil(SIM_CONFIG.CLICKS_MS / C.CLICK_INTERVAL_MS);
-  for (let i = 0; i < clickCount; i++) {
-    emitClick(context, context.destination, startAt + (i * C.CLICK_INTERVAL_MS) / 1000);
+  const attack = startAttack(context, context.destination);
+  try {
+    await wait(C.STAGE1_MS);
+    const isVibrated = typeof navigator.vibrate === 'function'
+      && navigator.vibrate(buildVibrationPattern(SIM_TOTAL_MS - C.STAGE1_MS));
+    await wait(SIM_TOTAL_MS - C.STAGE1_MS);
+    return { isVibrated };
+  } finally {
+    attack.stop();
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
   }
-  const humAt = startAt + SIM_CONFIG.HUM_AT_MS / 1000;
-  const humEnd = startAt + SIM_CONFIG.TOTAL_MS / 1000;
-  const hum = context.createOscillator();
-  const humGain = context.createGain();
-  hum.type = 'sine';
-  hum.frequency.value = SIM_CONFIG.HUM_HZ;
-  humGain.gain.setValueAtTime(0.0001, humAt);
-  humGain.gain.linearRampToValueAtTime(SIM_CONFIG.HUM_GAIN, humAt + 0.05);
-  humGain.gain.setValueAtTime(SIM_CONFIG.HUM_GAIN, humEnd - 0.05);
-  humGain.gain.linearRampToValueAtTime(0.0001, humEnd);
-  hum.connect(humGain).connect(context.destination);
-  hum.start(humAt);
-  hum.stop(humEnd + 0.01);
-  await wait(SIM_CONFIG.HUM_AT_MS);
-  const isVibrated = typeof navigator.vibrate === 'function' && navigator.vibrate(SIM_CONFIG.VIBRATION_PATTERN);
-  await wait(SIM_CONFIG.TOTAL_MS - SIM_CONFIG.HUM_AT_MS);
-  if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
-  return { isVibrated };
 }
 
 function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
@@ -391,29 +412,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   /* ---------- Реакції ---------- */
 
-  function playClick() {
-    emitClick(ctx, master);
-  }
-
-  function startReflex2(now) {
-    const { osc, gain } = emitRisingTone(ctx, master, C.TONE_RAMP_S, C.TONE_MAX_GAIN);
-    setStatus('Хропіння триває — Рефлекс 2');
-    onLog('Хропіння понад 2.5 с — Рефлекс 2: наростаючий тон 150–250 Гц і вібрація');
-    return { startedAt: now, osc, gain, nextVibAt: now };
-  }
-
-  function stopReflex2(reflex) {
-    releaseTone(ctx, reflex);
-    if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
-  }
-
-  function pulseVibration(reflex, now) {
-    if (now < reflex.nextVibAt) return;
-    const progress = Math.min(1, (now - reflex.startedAt) / (C.TONE_RAMP_S * 1000));
-    const duration = Math.round(C.VIB_MIN_MS + progress * (C.VIB_MAX_MS - C.VIB_MIN_MS));
-    reflex.nextVibAt = now + duration + C.VIB_PAUSE_MS;
+  // Вібрація пульсує в такт гулу; патерн на весь етап наростання повторюється, доки триває епізод
+  function pulseVibration(ep, now) {
+    if (now < ep.nextVibAt) return;
+    const chunkMs = (C.ATTACK_RAMP_S * 1000) - C.STAGE1_MS;
+    ep.nextVibAt = now + chunkMs;
     if (typeof navigator.vibrate === 'function') {
-      navigator.vibrate(duration);
+      navigator.vibrate(buildVibrationPattern(chunkMs));
     } else if (!st.isVibrationWarned) {
       st.isVibrationWarned = true;
       onLog('Вібрація не підтримується цим пристроєм або браузером — лише звуковий Рефлекс 2');
@@ -423,14 +428,15 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   /* ---------- Хропіння: епізоди ---------- */
 
   function startEpisode(now) {
-    st.episode = { start: now, lastActive: now, nextClickAt: now, reflex2: null };
+    st.episode = { start: now, lastActive: now, attack: startAttack(ctx, master), isStage2: false, nextVibAt: 0 };
     setStatus('Хропіння виявлено — Рефлекс 1');
-    onLog('Хропіння підтверджено — Рефлекс 1: ультракороткі кліки');
+    onLog('Хропіння підтверджено — Рефлекс 1: серія кліків 4 кГц (рефлекс ковтання)');
   }
 
   function endEpisode(now, reason) {
     const ep = st.episode;
-    if (ep.reflex2) stopReflex2(ep.reflex2);
+    ep.attack.stop();
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     st.episode = null;
     onLog(`Хропіння ${reason} (${((now - ep.start) / 1000).toFixed(1)} с)`);
     setStatus('Слухаю');
@@ -445,20 +451,19 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       endEpisode(now, 'завершилось');
       return;
     }
-    if (now - ep.start <= C.REFLEX2_AFTER_MS) {
-      if (now >= ep.nextClickAt) {
-        playClick();
-        ep.nextClickAt = now + C.CLICK_INTERVAL_MS;
-      }
-      return;
-    }
-    if (!ep.reflex2) ep.reflex2 = startReflex2(now);
-    if (now - ep.reflex2.startedAt > C.REFLEX2_MAX_MS) {
+    const elapsed = now - ep.start;
+    if (elapsed > C.ATTACK_MAX_MS) {
       st.lockoutUntil = now + C.LOCKOUT_MS;
-      endEpisode(now, 'примусово припинено (ліміт Рефлексу 2, захист від акустичного зворотного зв\'язку)');
+      endEpisode(now, 'примусово припинено (ліміт атаки, захист від акустичного зворотного зв\'язку)');
       return;
     }
-    pulseVibration(ep.reflex2, now);
+    if (elapsed < C.STAGE1_MS) return;
+    if (!ep.isStage2) {
+      ep.isStage2 = true;
+      setStatus('Хропіння триває — Рефлекс 2');
+      onLog('Хропіння понад 3 с — Рефлекс 2: наростаючий гул 150–250 Гц і пульсуюча вібрація');
+    }
+    pulseVibration(ep, now);
   }
 
   /* ---------- Хропіння: сегменти (пилкоподібна фаза вдиху) ---------- */
@@ -581,7 +586,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   async function stop() {
     if (!ctx) return;
     clearInterval(timerId);
-    if (st.episode && st.episode.reflex2) stopReflex2(st.episode.reflex2);
+    if (st.episode) st.episode.attack.stop();
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     stream.getTracks().forEach((track) => track.stop());
     const released = ctx;
@@ -823,7 +828,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   async function onSimulate() {
     const button = $('test-snore-btn');
     button.disabled = true;
-    $('sim-status').textContent = 'Симуляція: Рефлекс 1 (кліки) → Рефлекс 2 (тон і вібрація)…';
+    $('sim-status').textContent = 'Симуляція 10 с: Рефлекс 1 (кліки 4 кГц) → Рефлекс 2 (гул 150–250 Гц і пульсуюча вібрація)…';
     let text;
     try {
       const { isVibrated } = await simulateSnoreAttack();
