@@ -75,18 +75,18 @@
       <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-6">
         <p class="accent text-xs uppercase tracking-widest text-gold-400">Нічний режим</p>
         <p id="night-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
-        <p id="night-status" class="mt-2 text-center text-sm text-zinc-400">Сесію не запущено</p>
+        <p id="night-status" class="mt-2 text-center text-sm text-zinc-300">Сесію не запущено</p>
         <button id="night-toggle" type="button"
                 class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
           Почати нічну сесію
         </button>
-        <button id="sim-toggle" type="button"
-                class="mt-3 w-full rounded-xl border border-zinc-700 py-2.5 text-xs text-zinc-300 active:bg-zinc-900 disabled:opacity-40">
+        <button id="test-snore-btn" type="button"
+                class="mt-4 px-4 py-2 bg-zinc-800 text-zinc-200 rounded border border-zinc-700 disabled:opacity-40">
           🧪 Симулювати атаку хропіння
         </button>
-        <p id="sim-status" aria-live="polite" class="mt-2 text-center text-xs text-zinc-400"></p>
+        <p id="sim-status" aria-live="polite" class="mt-2 text-center text-xs text-zinc-300"></p>
       </div>
-      <p class="px-2 text-xs leading-relaxed text-zinc-400">
+      <p class="px-2 text-xs leading-relaxed text-zinc-300">
         Нічна сесія стартує лише з Bluetooth-гарнітурою й слухає мікрофон: хропіння запускає кліки
         (Рефлекс 1), а при тривалому хропінні — наростаючий тон і вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
         звук і вібрація перейдуть на динамік смартфона, подію буде записано в «Звіти».
@@ -106,7 +106,7 @@
              class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
           <div id="tone-fill" class="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all duration-500" style="width:0%"></div>
         </div>
-        <p id="tone-note" class="mt-3 text-xs text-zinc-400">Вправа додає +1%, якщо кут і амплітуда були в нормі весь час</p>
+        <p id="tone-note" class="mt-3 text-xs text-zinc-300">Кожна завершена вправа додає +1%</p>
       </div>
 
       <ul id="exercise-list" class="space-y-2"></ul>
@@ -123,7 +123,7 @@
           <video id="cam-video" class="h-full w-full object-cover" style="transform:scaleX(-1)"
                  autoplay playsinline muted></video>
           <canvas id="cam-canvas" class="absolute inset-0 h-full w-full"></canvas>
-          <p id="cam-placeholder" class="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">Камера вимкнена</p>
+          <p id="cam-placeholder" class="absolute inset-0 flex items-center justify-center text-sm text-zinc-300">Камера вимкнена</p>
           <p id="cam-countdown" class="absolute right-3 top-3 hidden rounded-lg bg-black/70 px-3 py-1 text-lg tabular-nums text-white"></p>
         </div>
         <div id="cam-status" aria-live="polite" class="mt-3 space-y-2 px-2 text-sm">
@@ -136,7 +136,7 @@
             <span class="text-xs text-zinc-200">(Рівень відкриття рота / напруги м'язів під час вправи)</span>
           </p>
         </div>
-        <p id="cam-note" class="mt-2 px-2 text-xs text-zinc-400">Відео обробляється лише на пристрої, нікуди не надсилається.</p>
+        <p id="cam-note" class="mt-2 px-2 text-xs text-zinc-300">Відео обробляється лише на пристрої, нікуди не надсилається.</p>
       </div>
 
       <div class="surface rounded-3xl border border-zinc-800 bg-gradient-to-b from-ink-800 to-ink-900 p-6">
@@ -148,14 +148,14 @@
             <p class="text-xs uppercase tracking-widest text-zinc-200">Денна сесія</p>
             <p id="day-timer" class="text-2xl font-light tabular-nums text-zinc-100">00:00</p>
           </div>
-          <p id="day-status" class="mt-2 text-center text-sm text-zinc-400">Сесію не запущено</p>
+          <p id="day-status" class="mt-2 text-center text-sm text-zinc-300">Сесію не запущено</p>
           <button id="day-toggle" type="button"
                   class="btn-primary mt-4 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
             Почати денну сесію
           </button>
         </div>
       </div>
-      <p class="px-2 text-xs leading-relaxed text-zinc-400">
+      <p class="px-2 text-xs leading-relaxed text-zinc-300">
         Удень дозволені обидва виходи: гарнітура й динамік смартфона.
       </p>
     </section>
@@ -177,12 +177,12 @@
         </div>
       </div>
       <ul id="report-list" class="space-y-2"></ul>
-      <p id="report-empty" class="py-8 text-center text-sm text-zinc-400">Поки що немає завершених сесій</p>
+      <p id="report-empty" class="py-8 text-center text-sm text-zinc-300">Поки що немає завершених сесій</p>
       <h2 class="pt-2 text-xs uppercase tracking-widest text-zinc-200">Журнал подій</h2>
       <ul id="log-list" class="space-y-1.5"></ul>
-      <p id="log-empty" class="py-4 text-center text-sm text-zinc-400">Подій поки немає</p>
+      <p id="log-empty" class="py-4 text-center text-sm text-zinc-300">Подій поки немає</p>
       <button id="report-clear" type="button"
-              class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-400 active:bg-zinc-900">
+              class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-300 active:bg-zinc-900">
         Очистити історію
       </button>
     </section>
@@ -243,7 +243,7 @@ const ENGINE_CONFIG = Object.freeze({
 });
 
 /* Спільний AudioContext: мобільний WebKit блокує звук до жесту користувача, тож розблокування централізоване */
-const UNLOCK_TARGETS = '.tab-btn, [id$="-toggle"], #exercise-list button';
+const UNLOCK_TARGETS = '.tab-btn, [id$="-toggle"], #test-snore-btn, #exercise-list button';
 const VioAudio = (() => {
   let shared = null;
 
@@ -289,8 +289,10 @@ const VioAudio = (() => {
 /* Реакції біофідбеку: спільні для двигуна та інженерного тесту (час `at` — за годинником AudioContext) */
 const SIM_CONFIG = Object.freeze({
   CLICKS_MS: 2000,
-  TONE_MS: 3000,
-  TONE_MAX_GAIN: 0.2,
+  HUM_AT_MS: 2500,
+  TOTAL_MS: 3000,
+  HUM_HZ: 200,
+  HUM_GAIN: 0.2,
   VIBRATION_PATTERN: Object.freeze([200, 100, 200])
 });
 
@@ -344,12 +346,22 @@ async function simulateSnoreAttack() {
   for (let i = 0; i < clickCount; i++) {
     emitClick(context, context.destination, startAt + (i * C.CLICK_INTERVAL_MS) / 1000);
   }
-  const tone = emitRisingTone(context, context.destination, SIM_CONFIG.TONE_MS / 1000,
-    SIM_CONFIG.TONE_MAX_GAIN, startAt + SIM_CONFIG.CLICKS_MS / 1000);
-  await wait(SIM_CONFIG.CLICKS_MS);
+  const humAt = startAt + SIM_CONFIG.HUM_AT_MS / 1000;
+  const humEnd = startAt + SIM_CONFIG.TOTAL_MS / 1000;
+  const hum = context.createOscillator();
+  const humGain = context.createGain();
+  hum.type = 'sine';
+  hum.frequency.value = SIM_CONFIG.HUM_HZ;
+  humGain.gain.setValueAtTime(0.0001, humAt);
+  humGain.gain.linearRampToValueAtTime(SIM_CONFIG.HUM_GAIN, humAt + 0.05);
+  humGain.gain.setValueAtTime(SIM_CONFIG.HUM_GAIN, humEnd - 0.05);
+  humGain.gain.linearRampToValueAtTime(0.0001, humEnd);
+  hum.connect(humGain).connect(context.destination);
+  hum.start(humAt);
+  hum.stop(humEnd + 0.01);
+  await wait(SIM_CONFIG.HUM_AT_MS);
   const isVibrated = typeof navigator.vibrate === 'function' && navigator.vibrate(SIM_CONFIG.VIBRATION_PATTERN);
-  await wait(SIM_CONFIG.TONE_MS);
-  releaseTone(context, tone);
+  await wait(SIM_CONFIG.TOTAL_MS - SIM_CONFIG.HUM_AT_MS);
   if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
   return { isVibrated };
 }
@@ -815,7 +827,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   /* ---------- Інженерний тест хропіння ---------- */
 
   async function onSimulate() {
-    const button = $('sim-toggle');
+    const button = $('test-snore-btn');
     button.disabled = true;
     $('sim-status').textContent = 'Симуляція: Рефлекс 1 (кліки) → Рефлекс 2 (тон і вібрація)…';
     let text;
@@ -1095,7 +1107,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     const li = document.createElement('li');
     li.className = 'flex gap-3 text-xs leading-relaxed';
     const time = document.createElement('span');
-    time.className = 'shrink-0 tabular-nums text-zinc-400';
+    time.className = 'shrink-0 tabular-nums text-zinc-300';
     time.textContent = new Date(event.t).toLocaleTimeString('uk-UA');
     const text = document.createElement('span');
     text.className = 'text-zinc-300';
@@ -1113,7 +1125,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     title.className = 'text-sm text-zinc-200';
     title.textContent = session.mode === 'night' ? 'Ніч' : 'День';
     const date = document.createElement('p');
-    date.className = 'text-xs text-zinc-400';
+    date.className = 'text-xs text-zinc-300';
     date.textContent = new Date(session.start).toLocaleString('uk-UA', {
       day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
     });
@@ -1148,7 +1160,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       });
     }
     $('output-action').addEventListener('click', onOutputAction);
-    $('sim-toggle').addEventListener('click', onSimulate);
+    $('test-snore-btn').addEventListener('click', onSimulate);
     $('bt-banner-close').addEventListener('click', () => {
       state.isBannerDismissed = true;
       renderBanner();
@@ -1199,7 +1211,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const TONE_KEY = 'vio.tone';
   const TONE_STEP = 1;
   const TONE_MAX = 100;
-  const TONE_NOTE_DEFAULT = 'Вправа додає +1%, якщо кут і амплітуда були в нормі весь час';
+  const TONE_NOTE_DEFAULT = 'Кожна завершена вправа додає +1%';
   const EXERCISE_SECONDS = 30;
   const EXERCISE_MS = EXERCISE_SECONDS * 1000;
   const EXERCISE_TICK_MS = 100;
@@ -1334,7 +1346,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   function buildExerciseRow(exercise) {
     const li = el('li', 'surface flex items-center gap-4 rounded-2xl border border-zinc-800 bg-ink-900 p-4');
     const info = el('div', 'min-w-0 flex-1');
-    info.append(el('p', 'text-sm text-zinc-200', exercise.name), el('p', 'mt-1 text-xs text-zinc-400', exercise.hint));
+    info.append(el('p', 'text-sm text-zinc-200', exercise.name), el('p', 'mt-1 text-xs text-zinc-300', exercise.hint));
     const button = el('button', 'relative h-16 w-16 shrink-0 rounded-full bg-zinc-900 text-sm font-semibold text-gold-400 active:opacity-80 disabled:opacity-40');
     button.type = 'button';
     const { svg, progress } = createRing();
