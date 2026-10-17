@@ -71,8 +71,10 @@
         </button>
       </div>
       <p class="px-2 text-xs leading-relaxed text-zinc-600">
-        Нічна сесія стартує лише з Bluetooth-гарнітурою. Якщо звук перемкнеться на динамік —
-        сесію буде зупинено автоматично. За бездіяльності екран маскується чорним для економії OLED.
+        Нічна сесія стартує лише з Bluetooth-гарнітурою й слухає мікрофон: хропіння запускає кліки
+        (Рефлекс 1), а при тривалому хропінні — наростаючий тон і вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
+        звук і вібрація перейдуть на динамік смартфона, подію буде записано в «Звіти».
+        За бездіяльності екран маскується чорним для економії OLED.
       </p>
     </section>
 
@@ -110,6 +112,9 @@
       </div>
       <ul id="report-list" class="space-y-2"></ul>
       <p id="report-empty" class="py-8 text-center text-sm text-zinc-600">Поки що немає завершених сесій</p>
+      <h2 class="pt-2 text-xs uppercase tracking-widest text-zinc-500">Журнал подій</h2>
+      <ul id="log-list" class="space-y-1.5"></ul>
+      <p id="log-empty" class="py-4 text-center text-sm text-zinc-600">Подій поки немає</p>
       <button id="report-clear" type="button"
               class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-400 active:bg-zinc-900">
         Очистити історію
@@ -132,10 +137,324 @@
   </div>
 
 <script>
+/* Акустичний двигун VIO: Web Audio (low-latency), детекція хропіння, драбина біофідбеку */
+const ENGINE_CONFIG = Object.freeze({
+  HIGHPASS_HZ: 60,
+  LOWPASS_HZ: 300,
+  FILTER_Q: Math.SQRT1_2,
+  FFT_SIZE: 1024,
+  ANALYSIS_INTERVAL_MS: 40,
+  ENVELOPE_SMOOTHING: 0.3,
+  CALIBRATION_MS: 3000,
+  CALIBRATION_SMOOTHING: 0.1,
+  FLOOR_SMOOTHING: 0.01,
+  MIN_TRIGGER_RMS: 0.004,
+  TRIGGER_RATIO: 3,
+  RELEASE_RATIO: 2,
+  GAP_BRIDGE_MS: 150,
+  MIN_BURST_MS: 300,
+  CONFIRM_MIN_MS: 800,
+  CONFIRM_MAX_MS: 2500,
+  SAW_PEAK_RATIO: 0.5,
+  EPISODE_GAP_MS: 4500,
+  REFLEX2_AFTER_MS: 2500,
+  REFLEX2_MAX_MS: 30000,
+  LOCKOUT_MS: 10000,
+  MASTER_GAIN: 1,
+  CLICK_HZ: 4000,
+  CLICK_MS: 8,
+  CLICK_GAIN: 0.2,
+  CLICK_INTERVAL_MS: 700,
+  TONE_MIN_HZ: 150,
+  TONE_MAX_HZ: 250,
+  TONE_START_GAIN: 0.02,
+  TONE_MAX_GAIN: 0.4,
+  TONE_RAMP_S: 10,
+  TONE_RELEASE_S: 0.15,
+  VIB_MIN_MS: 80,
+  VIB_MAX_MS: 500,
+  VIB_PAUSE_MS: 250
+});
+
+function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
+  const C = ENGINE_CONFIG;
+  let ctx = null;
+  let stream = null;
+  let analyser = null;
+  let master = null;
+  let buffer = null;
+  let timerId = null;
+  let st = null;
+
+  function setStatus(text) {
+    if (st.status === text) return;
+    st.status = text;
+    onStatus(text);
+  }
+
+  function micErrorMessage(err) {
+    if (err && err.name === 'NotAllowedError') return 'Дозвіл на мікрофон відхилено. Дозвольте доступ у налаштуваннях браузера.';
+    if (err && err.name === 'NotFoundError') return 'Мікрофон не знайдено.';
+    return 'Не вдалося відкрити мікрофон.';
+  }
+
+  /* ---------- Реакції ---------- */
+
+  function playClick() {
+    const t = ctx.currentTime;
+    const end = t + C.CLICK_MS / 1000;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = C.CLICK_HZ;
+    gain.gain.setValueAtTime(C.CLICK_GAIN, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+    osc.connect(gain).connect(master);
+    osc.start(t);
+    osc.stop(end + 0.005);
+  }
+
+  function startReflex2(now) {
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(C.TONE_MIN_HZ, t);
+    osc.frequency.linearRampToValueAtTime(C.TONE_MAX_HZ, t + C.TONE_RAMP_S);
+    gain.gain.setValueAtTime(C.TONE_START_GAIN, t);
+    gain.gain.linearRampToValueAtTime(C.TONE_MAX_GAIN, t + C.TONE_RAMP_S);
+    osc.connect(gain).connect(master);
+    osc.start(t);
+    setStatus('Хропіння триває — Рефлекс 2');
+    onLog('Хропіння понад 2.5 с — Рефлекс 2: наростаючий тон 150–250 Гц і вібрація');
+    return { startedAt: now, osc, gain, nextVibAt: now };
+  }
+
+  function stopReflex2(reflex) {
+    const t = ctx.currentTime;
+    const param = reflex.gain.gain;
+    const current = param.value;
+    param.cancelScheduledValues(t);
+    param.setValueAtTime(current, t);
+    param.setTargetAtTime(0, t, C.TONE_RELEASE_S);
+    reflex.osc.stop(t + 1);
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
+  }
+
+  function pulseVibration(reflex, now) {
+    if (now < reflex.nextVibAt) return;
+    const progress = Math.min(1, (now - reflex.startedAt) / (C.TONE_RAMP_S * 1000));
+    const duration = Math.round(C.VIB_MIN_MS + progress * (C.VIB_MAX_MS - C.VIB_MIN_MS));
+    reflex.nextVibAt = now + duration + C.VIB_PAUSE_MS;
+    if (typeof navigator.vibrate === 'function') {
+      navigator.vibrate(duration);
+    } else if (!st.isVibrationWarned) {
+      st.isVibrationWarned = true;
+      onLog('Вібрація не підтримується цим пристроєм або браузером — лише звуковий Рефлекс 2');
+    }
+  }
+
+  /* ---------- Хропіння: епізоди ---------- */
+
+  function startEpisode(now) {
+    st.episode = { start: now, lastActive: now, nextClickAt: now, reflex2: null };
+    setStatus('Хропіння виявлено — Рефлекс 1');
+    onLog('Хропіння підтверджено — Рефлекс 1: ультракороткі кліки');
+  }
+
+  function endEpisode(now, reason) {
+    const ep = st.episode;
+    if (ep.reflex2) stopReflex2(ep.reflex2);
+    st.episode = null;
+    onLog(`Хропіння ${reason} (${((now - ep.start) / 1000).toFixed(1)} с)`);
+    setStatus('Слухаю');
+  }
+
+  function updateEpisode(now) {
+    const ep = st.episode;
+    if (!ep) return;
+    if (st.seg && st.seg.isConfirmed) {
+      ep.lastActive = now;
+    } else if (now - ep.lastActive > C.EPISODE_GAP_MS) {
+      endEpisode(now, 'завершилось');
+      return;
+    }
+    if (now - ep.start <= C.REFLEX2_AFTER_MS) {
+      if (now >= ep.nextClickAt) {
+        playClick();
+        ep.nextClickAt = now + C.CLICK_INTERVAL_MS;
+      }
+      return;
+    }
+    if (!ep.reflex2) ep.reflex2 = startReflex2(now);
+    if (now - ep.reflex2.startedAt > C.REFLEX2_MAX_MS) {
+      st.lockoutUntil = now + C.LOCKOUT_MS;
+      endEpisode(now, 'примусово припинено (ліміт Рефлексу 2, захист від акустичного зворотного зв\'язку)');
+      return;
+    }
+    pulseVibration(ep.reflex2, now);
+  }
+
+  /* ---------- Хропіння: сегменти (пилкоподібна фаза вдиху) ---------- */
+
+  function evaluateSegment(now) {
+    const seg = st.seg;
+    const elapsed = now - seg.start;
+    if (seg.isConfirmed || seg.isRejected || elapsed < C.MIN_BURST_MS || elapsed < C.CONFIRM_MIN_MS) return;
+    if (elapsed > C.CONFIRM_MAX_MS) {
+      seg.isRejected = true;
+      return;
+    }
+    // Пилка: обвідна наростає, тож максимум припадає на другу половину сегмента
+    if (seg.peakAt - seg.start < C.SAW_PEAK_RATIO * elapsed) return;
+    seg.isConfirmed = true;
+    if (!st.episode) startEpisode(now);
+  }
+
+  function trackSegment(now) {
+    const trigger = Math.max(C.MIN_TRIGGER_RMS, st.floor * C.TRIGGER_RATIO);
+    const release = Math.max(C.MIN_TRIGGER_RMS / 2, st.floor * C.RELEASE_RATIO);
+    const isLockedOut = now < st.lockoutUntil;
+    const isAbove = st.seg ? st.env > release : !isLockedOut && st.env > trigger;
+
+    if (isAbove) {
+      st.lastAbove = now;
+      if (!st.seg) {
+        st.seg = { start: now, peak: st.env, peakAt: now, isConfirmed: false, isRejected: false };
+      } else if (st.env > st.seg.peak) {
+        st.seg.peak = st.env;
+        st.seg.peakAt = now;
+      }
+    } else if (!st.seg) {
+      if (!isLockedOut) st.floor += C.FLOOR_SMOOTHING * (st.env - st.floor);
+    } else if (now - st.lastAbove > C.GAP_BRIDGE_MS) {
+      st.seg = null;
+    }
+    if (st.seg) evaluateSegment(now);
+  }
+
+  function calibrate(now) {
+    st.floor = st.floor === 0 ? st.env : st.floor + C.CALIBRATION_SMOOTHING * (st.env - st.floor);
+    if (now - st.startedAt < C.CALIBRATION_MS) return;
+    st.isCalibrated = true;
+    setStatus('Слухаю');
+  }
+
+  function analyze() {
+    const now = performance.now();
+    analyser.getFloatTimeDomainData(buffer);
+    let sum = 0;
+    for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+    st.env += C.ENVELOPE_SMOOTHING * (Math.sqrt(sum / buffer.length) - st.env);
+    if (!st.isCalibrated) {
+      calibrate(now);
+      return;
+    }
+    trackSegment(now);
+    updateEpisode(now);
+  }
+
+  /* ---------- Публічний інтерфейс ---------- */
+
+  async function start() {
+    if (ctx) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) throw new Error('Web Audio API недоступний у цьому браузері.');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Цей браузер не дає доступу до мікрофона.');
+    }
+    const context = new AudioCtx({ latencyHint: 'interactive' });
+    let micStream;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+      });
+    } catch (err) {
+      console.error('VIO: помилка getUserMedia', err);
+      await context.close();
+      throw new Error(micErrorMessage(err));
+    }
+    await context.resume();
+
+    const source = context.createMediaStreamSource(micStream);
+    const highpass = context.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = C.HIGHPASS_HZ;
+    highpass.Q.value = C.FILTER_Q;
+    const lowpass = context.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = C.LOWPASS_HZ;
+    lowpass.Q.value = C.FILTER_Q;
+    const node = context.createAnalyser();
+    node.fftSize = C.FFT_SIZE;
+    source.connect(highpass);
+    highpass.connect(lowpass);
+    lowpass.connect(node);
+    const out = context.createGain();
+    out.gain.value = C.MASTER_GAIN;
+    out.connect(context.destination);
+
+    ctx = context;
+    stream = micStream;
+    analyser = node;
+    master = out;
+    buffer = new Float32Array(node.fftSize);
+    st = {
+      startedAt: performance.now(), floor: 0, env: 0, seg: null, lastAbove: 0, episode: null,
+      lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
+    };
+    stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
+    setStatus('Калібрування тиші…');
+    timerId = setInterval(analyze, C.ANALYSIS_INTERVAL_MS);
+  }
+
+  async function stop() {
+    if (!ctx) return;
+    clearInterval(timerId);
+    if (st.episode && st.episode.reflex2) stopReflex2(st.episode.reflex2);
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
+    stream.getTracks().forEach((track) => track.stop());
+    const closing = ctx;
+    ctx = null;
+    try {
+      await closing.close();
+    } catch (err) {
+      console.error('VIO: не вдалося закрити AudioContext', err);
+    }
+  }
+
+  // Перенаправляє вихід двигуна: 'speaker' — вбудований динамік, 'default' — системний вихід (гарнітура)
+  async function routeOutput(target) {
+    if (!ctx || typeof ctx.setSinkId !== 'function') {
+      return { ok: false, reason: 'браузер не підтримує setSinkId; звук іде на системний вихід' };
+    }
+    try {
+      let sinkId = '';
+      if (target === 'speaker') {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const speaker = devices.find((d) => d.kind === 'audiooutput'
+          && d.deviceId !== 'default' && d.deviceId !== 'communications' && !isBluetoothLabel(d.label));
+        sinkId = speaker ? speaker.deviceId : '';
+      }
+      await ctx.setSinkId(sinkId);
+      return { ok: true };
+    } catch (err) {
+      console.error('VIO: помилка setSinkId', err);
+      return { ok: false, reason: 'помилка перемикання виходу' };
+    }
+  }
+
+  return { start, stop, routeOutput };
+}
+</script>
+
+<script>
 (() => {
   'use strict';
 
   const STORAGE_KEY = 'vio.sessions';
+  const MAX_LOG_ROWS = 50;
+  const MAX_SESSION_EVENTS = 500;
   const MASK_IDLE_MS = 10000;
   const MASK_SHIFT_MS = 60000;
   const MAX_STORED_SESSIONS = 200;
@@ -155,6 +474,9 @@
     output: 'unknown',
     manualHeadset: false,
     session: null,
+    engine: null,
+    wakeLock: null,
+    isStarting: false,
     tickId: null,
     maskIdleId: null,
     maskShiftId: null
@@ -168,10 +490,22 @@
       && (s.endedBy === 'user' || s.endedBy === 'failsafe');
   }
 
+  function isValidEvent(e) {
+    return e && Number.isFinite(e.t) && typeof e.text === 'string';
+  }
+
+  function normalizeSession(s) {
+    return {
+      ...s,
+      events: Array.isArray(s.events) ? s.events.filter(isValidEvent) : [],
+      fallbacks: Number.isFinite(s.fallbacks) ? s.fallbacks : 0
+    };
+  }
+
   function loadSessions() {
     try {
       const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-      return Array.isArray(parsed) ? parsed.filter(isValidSession) : [];
+      return Array.isArray(parsed) ? parsed.filter(isValidSession).map(normalizeSession) : [];
     } catch (err) {
       console.error('VIO: не вдалося прочитати історію', err);
       return [];
@@ -241,7 +575,7 @@
     state.output = await detectOutput();
     if (state.output !== 'unknown') state.manualHeadset = false;
     renderOutput();
-    enforceFailSafe();
+    await enforceFailSafe();
   }
 
   // Запит дозволу на мікрофон потрібен лише щоб браузер показав назви пристроїв
@@ -276,35 +610,120 @@
     await refreshOutput();
   }
 
-  function enforceFailSafe() {
+  // Втрата Bluetooth не зупиняє сесію: звук і вібрація йдуть на вбудований динамік (резерв)
+  async function enforceFailSafe() {
     const s = state.session;
-    if (!s || s.mode !== 'night' || effectiveOutput() === 'bluetooth') return;
-    stopSession('failsafe');
-    showAlert('Fail-Safe: Bluetooth-гарнітуру втрачено. Нічну сесію зупинено — звук не піде на динамік.');
+    if (!s || s.mode !== 'night' || !state.engine) return;
+    const isOnBluetooth = effectiveOutput() === 'bluetooth';
+    if (!isOnBluetooth && !s.isOnFallback) {
+      s.isOnFallback = true;
+      s.fallbacks += 1;
+      showAlert('Fail-Safe: Bluetooth-вихід втрачено. Звук і вібрацію переведено на динамік смартфона.');
+      const result = await state.engine.routeOutput('speaker');
+      logEvent(result.ok
+        ? 'Bluetooth-вихід втрачено — аудіо та вібрацію перенаправлено на вбудований динамік смартфона (резерв)'
+        : `Bluetooth-вихід втрачено — перемикання на динамік не вдалося: ${result.reason}`);
+    } else if (isOnBluetooth && s.isOnFallback) {
+      s.isOnFallback = false;
+      showAlert('');
+      const result = await state.engine.routeOutput('default');
+      logEvent(result.ok
+        ? 'Bluetooth-вихід відновлено — аудіо повернуто на гарнітуру'
+        : `Bluetooth-вихід відновлено — повернення виходу не вдалося: ${result.reason}`);
+    }
   }
 
   /* ---------- Сесії ---------- */
 
-  function startSession(mode) {
-    if (state.session) return;
+  function logEvent(text) {
+    console.info(`[VIO] ${text}`);
+    const s = state.session;
+    if (!s || s.events.length >= MAX_SESSION_EVENTS) return;
+    s.events.push({ t: Date.now(), text });
+  }
+
+  function setSessionStatus(text) {
+    if (!state.session) return;
+    state.session.status = text;
+    renderSession();
+  }
+
+  function handleMicLost() {
+    if (!state.session) return;
+    logEvent('Мікрофон втрачено — сесію зупинено');
+    stopSession('failsafe');
+    showAlert('Fail-Safe: втрачено доступ до мікрофона. Нічну сесію зупинено.');
+  }
+
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      state.wakeLock = await navigator.wakeLock.request('screen');
+      state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+    } catch (err) {
+      console.error('VIO: wake lock недоступний', err);
+      logEvent('Не вдалося утримувати екран увімкненим — слухання може перерватись у фоні');
+    }
+  }
+
+  function releaseWakeLock() {
+    if (!state.wakeLock) return;
+    state.wakeLock.release().catch((err) => console.error('VIO: помилка звільнення wake lock', err));
+    state.wakeLock = null;
+  }
+
+  async function startSession(mode) {
+    if (state.session || state.isStarting) return;
     if (mode === 'night' && effectiveOutput() !== 'bluetooth') {
       showAlert('Нічну сесію можна почати лише з Bluetooth-гарнітурою.');
       return;
     }
     showAlert('');
-    state.session = { mode, start: Date.now(), seconds: 0 };
+    if (mode === 'night') {
+      const engine = createAcousticEngine({
+        isBluetoothLabel: (label) => BLUETOOTH_PATTERN.test(label),
+        onLog: logEvent,
+        onStatus: setSessionStatus,
+        onLost: handleMicLost
+      });
+      state.isStarting = true;
+      try {
+        await engine.start();
+      } catch (err) {
+        showAlert(err.message);
+        return;
+      } finally {
+        state.isStarting = false;
+      }
+      state.engine = engine;
+    }
+    state.session = {
+      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isOnFallback: false
+    };
+    logEvent(mode === 'night' ? 'Нічну сесію розпочато (вихід: Bluetooth-гарнітура)' : 'Денну сесію розпочато');
     state.tickId = setInterval(tick, 1000);
     renderSession();
-    if (mode === 'night') armMask();
+    if (mode === 'night') {
+      armMask();
+      acquireWakeLock();
+    }
   }
 
   function stopSession(endedBy) {
     const s = state.session;
     if (!s) return;
     clearInterval(state.tickId);
+    logEvent(`Сесію завершено (${endedBy === 'user' ? 'користувачем' : 'Fail-Safe'})`);
     state.session = null;
+    if (state.engine) {
+      state.engine.stop();
+      state.engine = null;
+    }
+    releaseWakeLock();
     const seconds = Math.round((Date.now() - s.start) / 1000);
-    saveSessions([...loadSessions(), { mode: s.mode, start: s.start, seconds, endedBy }]);
+    saveSessions([...loadSessions(), {
+      mode: s.mode, start: s.start, seconds, endedBy, events: s.events, fallbacks: s.fallbacks
+    }]);
     disarmMask();
     renderSession();
     renderReports();
@@ -324,7 +743,7 @@
       const blocked = Boolean(s) && s.mode !== mode;
       const label = mode === 'night' ? 'нічну' : 'денну';
       $(`${mode}-timer`).textContent = formatClock(active ? s.seconds : 0);
-      $(`${mode}-status`).textContent = active ? 'Сесія триває' : blocked ? 'Іншу сесію запущено' : 'Сесію не запущено';
+      $(`${mode}-status`).textContent = active ? (s.status || 'Сесія триває') : blocked ? 'Іншу сесію запущено' : 'Сесію не запущено';
       $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : `Почати ${label} сесію`;
       $(`${mode}-toggle`).disabled = blocked;
       $(`${mode}-toggle`).classList.toggle('opacity-40', blocked);
@@ -400,12 +819,30 @@
     const total = list.reduce((sum, s) => sum + s.seconds, 0);
     $('stat-count').textContent = String(list.length);
     $('stat-total').textContent = formatDuration(total);
-    $('stat-failsafe').textContent = String(list.filter((s) => s.endedBy === 'failsafe').length);
+    const live = state.session ? [state.session] : [];
+    const withLive = [...list, ...live];
+    $('stat-failsafe').textContent = String(withLive.reduce((sum, s) => sum + s.fallbacks, 0));
+    const events = withLive.flatMap((s) => s.events).sort((a, b) => b.t - a.t).slice(0, MAX_LOG_ROWS);
+    $('log-empty').classList.toggle('hidden', events.length > 0);
+    $('log-list').replaceChildren(...events.map(buildLogRow));
     $('report-empty').classList.toggle('hidden', list.length > 0);
     $('report-clear').classList.toggle('hidden', list.length === 0);
 
     const ul = $('report-list');
     ul.replaceChildren(...[...list].reverse().map(buildReportRow));
+  }
+
+  function buildLogRow(event) {
+    const li = document.createElement('li');
+    li.className = 'flex gap-3 text-xs leading-relaxed';
+    const time = document.createElement('span');
+    time.className = 'shrink-0 tabular-nums text-zinc-600';
+    time.textContent = new Date(event.t).toLocaleTimeString('uk-UA');
+    const text = document.createElement('span');
+    text.className = 'text-zinc-400';
+    text.textContent = event.text;
+    li.append(time, text);
+    return li;
   }
 
   function buildReportRow(session) {
@@ -452,6 +889,10 @@
       });
     }
     $('output-action').addEventListener('click', onOutputAction);
+    document.addEventListener('visibilitychange', () => {
+      const isNight = state.session && state.session.mode === 'night';
+      if (document.visibilityState === 'visible' && isNight && !state.wakeLock) acquireWakeLock();
+    });
     $('report-clear').addEventListener('click', () => {
       if (window.confirm('Видалити всю історію сесій?')) {
         saveSessions([]);
