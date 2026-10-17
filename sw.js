@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'vio-v1.6';
+const CACHE_VERSION = 'vio-v1.7';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const TAILWIND_HOST = 'cdn.tailwindcss.com';
 
