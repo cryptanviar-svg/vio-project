@@ -80,6 +80,42 @@
 
     <!-- День -->
     <section id="tab-day" role="tabpanel" aria-labelledby="btn-day" class="hidden space-y-4">
+      <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-6">
+        <div class="flex items-baseline justify-between">
+          <p class="accent text-xs uppercase tracking-widest text-gold-400">Тонус м'язів глотки</p>
+          <p id="tone-value" class="text-2xl font-light tabular-nums text-zinc-100">0%</p>
+        </div>
+        <div id="tone-bar" role="progressbar" aria-label="Тонус м'язів глотки"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+             class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
+          <div id="tone-fill" class="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all duration-500" style="width:0%"></div>
+        </div>
+        <p id="tone-note" class="mt-3 text-xs text-zinc-500">Кожна завершена вправа додає +5%</p>
+      </div>
+
+      <ul id="exercise-list" class="space-y-2"></ul>
+
+      <div class="surface rounded-3xl border border-zinc-800 bg-ink-900 p-4">
+        <div class="flex items-center justify-between px-2 pb-3">
+          <p class="accent text-xs uppercase tracking-widest text-gold-400">Face-Tracking · симуляція</p>
+          <button id="cam-toggle" type="button"
+                  class="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 active:bg-zinc-900">
+            Увімкнути камеру
+          </button>
+        </div>
+        <div id="cam-frame" class="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black">
+          <video id="cam-video" class="h-full w-full object-cover" style="transform:scaleX(-1)"
+                 autoplay playsinline muted></video>
+          <canvas id="cam-canvas" class="absolute inset-0 h-full w-full"></canvas>
+          <p id="cam-placeholder" class="absolute inset-0 flex items-center justify-center text-sm text-zinc-600">Камера вимкнена</p>
+        </div>
+        <div id="cam-status" aria-live="polite" class="mt-3 grid grid-cols-2 gap-3 px-2 text-sm text-zinc-300">
+          <p id="cam-angle">Кут нахилу: —</p>
+          <p id="cam-amp">Амплітуда: —</p>
+        </div>
+        <p id="cam-note" class="mt-2 px-2 text-xs text-zinc-600">Відео обробляється лише на пристрої, нікуди не надсилається.</p>
+      </div>
+
       <div class="surface rounded-3xl border border-zinc-800 bg-gradient-to-b from-ink-800 to-ink-900 p-6">
         <p class="accent text-xs uppercase tracking-widest text-gold-400">Денний режим</p>
         <p id="day-timer" class="mt-4 text-center text-6xl font-light tabular-nums text-zinc-100">00:00</p>
@@ -810,6 +846,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     document.querySelector('meta[name="theme-color"]').content = tab === 'night' ? '#000000' : '#07070a';
     if (tab === 'reports') renderReports();
     if (tab === 'night') armMask(); else disarmMask();
+    document.dispatchEvent(new CustomEvent('vio:tabchange', { detail: tab }));
   }
 
   /* ---------- Звіти ---------- */
@@ -921,6 +958,383 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   init();
   registerServiceWorker();
+})();
+</script>
+
+<script>
+/* Етап 4: гейміфікація тонусу та симуляція Face-Tracking (вкладка «День») */
+(() => {
+  'use strict';
+
+  const TONE_KEY = 'vio.tone';
+  const TONE_STEP = 5;
+  const TONE_MAX = 100;
+  const TONE_NOTE_DEFAULT = 'Кожна завершена вправа додає +5%';
+  const EXERCISE_SECONDS = 10;
+  const EXERCISE_MS = EXERCISE_SECONDS * 1000;
+  const EXERCISE_TICK_MS = 100;
+  const DONE_FLASH_MS = 1000;
+  const RING_RADIUS = 28;
+  const RING_LENGTH = 2 * Math.PI * RING_RADIUS;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const SUCCESS_NOTES_HZ = [523.25, 659.25, 783.99];
+  const NOTE_SECONDS = 0.14;
+  const SUCCESS_GAIN = 0.2;
+  const EXERCISES = [
+    { id: 'tongue', name: 'Язик до піднебіння', hint: 'Притисніть кінчик язика до верхнього піднебіння й утримуйте.' },
+    { id: 'vowel', name: 'Голосна «И»', hint: 'Протяжно промовляйте «и», напружуючи м\'яке піднебіння.' },
+    { id: 'palate', name: 'Підйом піднебіння', hint: 'Широко відкрийте рот і плавно промовляйте «а».' }
+  ];
+
+  const TRACK_INTERVAL_MS = 2000;
+  const JAW_POINTS = 9;
+  const AXIS_Y = [0.3, 0.45, 0.6];
+  const MARK_JITTER = 0.012;
+  const MARK_RADIUS_PX = 4;
+  const MAX_TILT_DEG = 4;
+  const AMPLITUDE_MIN = 90;
+  const AMPLITUDE_MAX = 99;
+  const GRID_DIVISIONS = 4;
+  const MARK_COLOR = '#34d399';
+  const GRID_COLOR = 'rgba(255, 255, 255, 0.14)';
+
+  const $ = (id) => document.getElementById(id);
+  const exerciseUi = new Map();
+  let tone = 0;
+  let running = null;
+  let audioCtx = null;
+  const cam = { stream: null, attempt: 0, trackId: null, marks: [] };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  /* ---------- Тонус ---------- */
+
+  function readTone() {
+    try {
+      const raw = localStorage.getItem(TONE_KEY);
+      const value = Number(raw);
+      return raw !== null && Number.isInteger(value) && value >= 0 && value <= TONE_MAX ? value : 0;
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати тонус', err);
+      return 0;
+    }
+  }
+
+  function renderTone() {
+    $('tone-value').textContent = `${tone}%`;
+    $('tone-fill').style.width = `${tone}%`;
+    $('tone-bar').setAttribute('aria-valuenow', String(tone));
+  }
+
+  function persistTone() {
+    try {
+      localStorage.setItem(TONE_KEY, String(tone));
+      $('tone-note').textContent = TONE_NOTE_DEFAULT;
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти тонус', err);
+      $('tone-note').textContent = 'Не вдалося зберегти прогрес: сховище недоступне.';
+    }
+  }
+
+  function addTone() {
+    tone = Math.min(TONE_MAX, tone + TONE_STEP);
+    persistTone();
+    renderTone();
+  }
+
+  /* ---------- Звук успіху (Web Audio) ---------- */
+
+  function getAudioContext() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!audioCtx) audioCtx = new AudioCtx({ latencyHint: 'interactive' });
+    return audioCtx;
+  }
+
+  // Контекст створюється й розблоковується в момент натискання «Старт» (жест користувача)
+  function unlockAudio() {
+    const ctx = getAudioContext();
+    if (ctx) ctx.resume().catch((err) => console.error('VIO: не вдалося запустити AudioContext', err));
+  }
+
+  function playNote(ctx, hz, startAt) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const endAt = startAt + NOTE_SECONDS;
+    osc.type = 'sine';
+    osc.frequency.value = hz;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.linearRampToValueAtTime(SUCCESS_GAIN, startAt + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(startAt);
+    osc.stop(endAt + 0.05);
+  }
+
+  function playSuccessSound() {
+    const ctx = getAudioContext();
+    if (!ctx) {
+      console.error('VIO: Web Audio API недоступний');
+      return;
+    }
+    const startAt = ctx.currentTime + 0.02;
+    SUCCESS_NOTES_HZ.forEach((hz, i) => playNote(ctx, hz, startAt + i * NOTE_SECONDS));
+  }
+
+  /* ---------- Вправи ---------- */
+
+  function createRing() {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 64 64');
+    svg.setAttribute('class', 'pointer-events-none absolute inset-0 h-full w-full -rotate-90');
+    const makeCircle = (stroke) => {
+      const c = document.createElementNS(SVG_NS, 'circle');
+      c.setAttribute('cx', '32');
+      c.setAttribute('cy', '32');
+      c.setAttribute('r', String(RING_RADIUS));
+      c.setAttribute('fill', 'none');
+      c.setAttribute('stroke', stroke);
+      c.setAttribute('stroke-width', '4');
+      return c;
+    };
+    const track = makeCircle('#27272a');
+    const progress = makeCircle('#d4a94f');
+    progress.setAttribute('stroke-linecap', 'round');
+    progress.style.strokeDasharray = String(RING_LENGTH);
+    progress.style.strokeDashoffset = String(RING_LENGTH);
+    progress.style.transition = `stroke-dashoffset ${EXERCISE_TICK_MS}ms linear`;
+    svg.append(track, progress);
+    return { svg, progress };
+  }
+
+  function buildExerciseRow(exercise) {
+    const li = el('li', 'surface flex items-center gap-4 rounded-2xl border border-zinc-800 bg-ink-900 p-4');
+    const info = el('div', 'min-w-0 flex-1');
+    info.append(el('p', 'text-sm text-zinc-200', exercise.name), el('p', 'mt-1 text-xs text-zinc-500', exercise.hint));
+    const button = el('button', 'relative h-16 w-16 shrink-0 rounded-full bg-zinc-900 text-sm font-semibold text-gold-400 active:opacity-80 disabled:opacity-40');
+    button.type = 'button';
+    const { svg, progress } = createRing();
+    const label = el('span', 'relative', 'Старт');
+    button.append(svg, label);
+    button.addEventListener('click', () => onExerciseClick(exercise.id));
+    exerciseUi.set(exercise.id, { name: exercise.name, button, progress, label });
+    li.append(info, button);
+    return li;
+  }
+
+  function renderExercises() {
+    const elapsed = running ? Date.now() - running.startedAt : 0;
+    exerciseUi.forEach((ui, id) => {
+      const isActive = Boolean(running) && running.id === id;
+      const progress = isActive ? Math.min(1, elapsed / EXERCISE_MS) : 1;
+      ui.progress.style.strokeDashoffset = String(RING_LENGTH * progress);
+      ui.label.textContent = isActive ? String(Math.max(1, Math.ceil((EXERCISE_MS - elapsed) / 1000))) : 'Старт';
+      ui.button.disabled = Boolean(running) && !isActive;
+      ui.button.setAttribute('aria-label', `${isActive ? 'Скасувати' : 'Старт'}: ${ui.name}`);
+    });
+  }
+
+  function cancelExercise() {
+    if (!running) return;
+    clearInterval(running.timerId);
+    running = null;
+    renderExercises();
+  }
+
+  function completeExercise() {
+    const { id, timerId } = running;
+    clearInterval(timerId);
+    running = null;
+    addTone();
+    playSuccessSound();
+    renderExercises();
+    exerciseUi.get(id).label.textContent = '✓';
+    setTimeout(() => { if (!running) renderExercises(); }, DONE_FLASH_MS);
+  }
+
+  function tickExercise() {
+    if (!running) return;
+    if (Date.now() - running.startedAt >= EXERCISE_MS) completeExercise();
+    else renderExercises();
+  }
+
+  function onExerciseClick(id) {
+    if (running) {
+      if (running.id === id) cancelExercise();
+      return;
+    }
+    unlockAudio();
+    running = { id, startedAt: Date.now(), timerId: setInterval(tickExercise, EXERCISE_TICK_MS) };
+    renderExercises();
+  }
+
+  /* ---------- Face-Tracking (симуляція) ---------- */
+
+  function jitter() {
+    return (Math.random() - 0.5) * 2 * MARK_JITTER;
+  }
+
+  function buildMarks() {
+    const jaw = Array.from({ length: JAW_POINTS }, (_, i) => {
+      const t = i / (JAW_POINTS - 1);
+      return { x: 0.5 + 0.28 * Math.cos(Math.PI * (1 - t)), y: 0.45 + 0.37 * Math.sin(Math.PI * t) };
+    });
+    const axis = AXIS_Y.map((y) => ({ x: 0.5, y }));
+    return [...jaw, ...axis].map((p) => ({ x: p.x + jitter(), y: p.y + jitter() }));
+  }
+
+  function drawGrid(ctx, width, height) {
+    ctx.strokeStyle = GRID_COLOR;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < GRID_DIVISIONS; i++) {
+      ctx.moveTo((width * i) / GRID_DIVISIONS, 0);
+      ctx.lineTo((width * i) / GRID_DIVISIONS, height);
+      ctx.moveTo(0, (height * i) / GRID_DIVISIONS);
+      ctx.lineTo(width, (height * i) / GRID_DIVISIONS);
+    }
+    ctx.stroke();
+  }
+
+  function drawMarks(ctx, width, height) {
+    const radius = MARK_RADIUS_PX * (window.devicePixelRatio || 1);
+    ctx.strokeStyle = MARK_COLOR;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    cam.marks.slice(0, JAW_POINTS).forEach((p, i) => {
+      if (i === 0) ctx.moveTo(p.x * width, p.y * height);
+      else ctx.lineTo(p.x * width, p.y * height);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = MARK_COLOR;
+    cam.marks.forEach((p) => {
+      ctx.beginPath();
+      ctx.arc(p.x * width, p.y * height, radius, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  function drawOverlay() {
+    const canvas = $('cam-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!cam.stream) return;
+    drawGrid(ctx, canvas.width, canvas.height);
+    drawMarks(ctx, canvas.width, canvas.height);
+  }
+
+  function syncCanvasSize() {
+    const canvas = $('cam-canvas');
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.round(canvas.clientWidth * dpr);
+    const height = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    drawOverlay();
+  }
+
+  function analyzeJaw() {
+    const tilt = (Math.random() * MAX_TILT_DEG).toFixed(1);
+    const amplitude = AMPLITUDE_MIN + Math.floor(Math.random() * (AMPLITUDE_MAX - AMPLITUDE_MIN + 1));
+    cam.marks = buildMarks();
+    $('cam-angle').textContent = `Кут нахилу: OK (${tilt}°)`;
+    $('cam-amp').textContent = `Амплітуда: ${amplitude}%`;
+    drawOverlay();
+  }
+
+  function cameraErrorMessage(err) {
+    if (err && err.name === 'NotAllowedError') return 'Дозвіл на камеру відхилено. Дозвольте доступ у налаштуваннях браузера.';
+    if (err && err.name === 'NotFoundError') return 'Камеру не знайдено.';
+    return 'Не вдалося відкрити камеру.';
+  }
+
+  function setCameraUi(isOn) {
+    $('cam-toggle').textContent = isOn ? 'Вимкнути камеру' : 'Увімкнути камеру';
+    $('cam-placeholder').classList.toggle('hidden', isOn);
+    if (isOn) return;
+    $('cam-angle').textContent = 'Кут нахилу: —';
+    $('cam-amp').textContent = 'Амплітуда: —';
+  }
+
+  function stopCamera() {
+    cam.attempt += 1;
+    clearInterval(cam.trackId);
+    cam.trackId = null;
+    if (cam.stream) cam.stream.getTracks().forEach((track) => track.stop());
+    cam.stream = null;
+    cam.marks = [];
+    $('cam-video').srcObject = null;
+    setCameraUi(false);
+    drawOverlay();
+  }
+
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      $('cam-note').textContent = 'Цей браузер не дає доступу до камери.';
+      return;
+    }
+    const attempt = ++cam.attempt;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+    } catch (err) {
+      console.error('VIO: помилка getUserMedia (камера)', err);
+      $('cam-note').textContent = cameraErrorMessage(err);
+      return;
+    }
+    if (attempt !== cam.attempt) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    cam.stream = stream;
+    stream.getVideoTracks().forEach((track) => track.addEventListener('ended', stopCamera));
+    $('cam-video').srcObject = stream;
+    $('cam-note').textContent = 'Відео обробляється лише на пристрої, нікуди не надсилається.';
+    setCameraUi(true);
+    syncCanvasSize();
+    analyzeJaw();
+    cam.trackId = setInterval(analyzeJaw, TRACK_INTERVAL_MS);
+  }
+
+  /* ---------- Ініціалізація ---------- */
+
+  function stopActivities() {
+    stopCamera();
+    cancelExercise();
+  }
+
+  function init() {
+    tone = readTone();
+    renderTone();
+    $('exercise-list').append(...EXERCISES.map(buildExerciseRow));
+    renderExercises();
+
+    $('cam-toggle').addEventListener('click', () => {
+      if (cam.stream) stopCamera(); else startCamera();
+    });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(syncCanvasSize).observe($('cam-frame'));
+    window.addEventListener('storage', (event) => {
+      if (event.key !== TONE_KEY) return;
+      tone = readTone();
+      renderTone();
+    });
+    document.addEventListener('vio:tabchange', (event) => {
+      if (event.detail !== 'day') stopActivities();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stopActivities();
+    });
+  }
+
+  init();
 })();
 </script>
 </body>
