@@ -60,7 +60,7 @@
     </div>
     <div id="bt-banner" role="alert" class="hidden bg-red-950 text-red-200">
       <div class="mx-auto flex max-w-xl items-center justify-between gap-3 px-4 py-2 text-xs">
-        <p>Нічну сесію можна почати лише з Bluetooth-гарнітурою</p>
+        <p>Доступ до мікрофона заблоковано. Дозвольте його в налаштуваннях браузера й натисніть «Перевірити»</p>
         <button id="bt-banner-close" type="button" aria-label="Закрити повідомлення"
                 class="shrink-0 rounded-md px-2 py-1 text-base leading-none active:bg-red-900">✕</button>
       </div>
@@ -639,7 +639,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const OUTPUT = {
     bluetooth: { text: '🎧 Bluetooth-гарнітура', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
     speaker: { text: '📱 Динамік смартфона (Резерв)', dot: 'bg-orange-400', tone: 'text-orange-300' },
-    unknown: { text: 'Невизначено (вважається динаміком)', dot: 'bg-zinc-600', tone: 'text-zinc-200' }
+    ready: { text: '✅ Аудіоканал готовий (Bluetooth/Динамік)', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
+    denied: { text: '⛔ Немає доступу до мікрофона', dot: 'bg-red-500', tone: 'text-red-300' },
+    unknown: { text: 'Не перевірено (звук піде на системний вихід)', dot: 'bg-zinc-600', tone: 'text-zinc-200' }
   };
   const TAB_ACTIVE = ['text-gold-400', 'font-semibold'];
   const TAB_IDLE = ['text-zinc-400'];
@@ -648,7 +650,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const state = {
     tab: 'night',
     output: 'unknown',
-    manualHeadset: false,
+    micPermission: 'unknown',
     isBannerDismissed: false,
     session: null,
     engine: null,
@@ -761,63 +763,55 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   }
 
   function effectiveOutput() {
-    return state.output === 'unknown' && state.manualHeadset ? 'bluetooth' : state.output;
+    return state.output;
   }
 
   function renderOutput() {
     const kind = effectiveOutput();
     const info = OUTPUT[kind];
-    $('output-label').textContent = state.manualHeadset && state.output === 'unknown'
-      ? '🎧 Bluetooth-гарнітура (підтверджено вручну)' : info.text;
+    $('output-label').textContent = info.text;
     $('output-label').className = `truncate text-sm font-medium ${info.tone}`;
     $('output-dot').className = `h-2.5 w-2.5 shrink-0 rounded-full ${info.dot}`;
-    if (kind === 'bluetooth') state.isBannerDismissed = false;
+    if (kind !== 'denied') state.isBannerDismissed = false;
     renderSession();
   }
 
-  // Червона плашка видна, поки нічну сесію почати не можна; ✕ ховає її вручну
+  // Червона плашка видна лише коли доступ до мікрофона заблоковано; ✕ ховає її вручну
   function renderBanner() {
-    const isShown = !state.session && effectiveOutput() !== 'bluetooth' && !state.isBannerDismissed;
+    const isShown = !state.session && effectiveOutput() === 'denied' && !state.isBannerDismissed;
     $('bt-banner').classList.toggle('hidden', !isShown);
   }
 
   async function refreshOutput() {
-    state.output = await detectOutput();
-    if (state.output !== 'unknown') state.manualHeadset = false;
+    const detected = await detectOutput();
+    // Мобільні браузери ховають назви виходів: звук і так іде на вихід, який обрала ОС
+    state.output = detected !== 'unknown' ? detected
+      : state.micPermission === 'granted' ? 'ready'
+      : state.micPermission === 'denied' ? 'denied' : 'unknown';
     renderOutput();
     await enforceFailSafe();
   }
 
-  // Запит дозволу на мікрофон потрібен лише щоб браузер показав назви пристроїв
+  // Запит дозволу на мікрофон активує аудіо й намагається розкрити назви пристроїв
   async function requestDeviceLabels() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'granted';
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((t) => t.stop());
-      return true;
+      return 'granted';
     } catch (err) {
-      console.error('VIO: дозвіл на пристрої відхилено', err);
-      return false;
+      console.error('VIO: дозвіл на мікрофон відхилено', err);
+      return err.name === 'NotAllowedError' || err.name === 'SecurityError' ? 'denied' : 'granted';
     }
   }
 
-  // Спершу дозвіл на мікрофон (інакше мобільні браузери віддають порожній список пристроїв), потім перевірка
   async function onOutputAction() {
     const button = $('output-action');
     button.disabled = true;
     button.textContent = 'Перевірка…';
     try {
-      const granted = await requestDeviceLabels();
-      state.manualHeadset = false;
+      state.micPermission = await requestDeviceLabels();
       await refreshOutput();
-      if (state.output === 'unknown') {
-        state.manualHeadset = window.confirm(
-          granted
-            ? 'Браузер не показує тип аудіовиходу. Гарнітура Bluetooth підключена?'
-            : 'Немає доступу до списку пристроїв. Гарнітура Bluetooth підключена?'
-        );
-        renderOutput();
-      }
     } finally {
       button.disabled = false;
       button.textContent = 'Перевірити';
@@ -851,7 +845,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   async function enforceFailSafe() {
     const s = state.session;
     if (!s || s.mode !== 'night' || !state.engine) return;
-    const isOnBluetooth = effectiveOutput() === 'bluetooth';
+    const isOnBluetooth = effectiveOutput() !== 'speaker';
     if (!isOnBluetooth && !s.isOnFallback) {
       s.isOnFallback = true;
       s.fallbacks += 1;
@@ -941,10 +935,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   async function startSession(mode) {
     if (state.session || state.isStarting) return;
-    if (mode === 'night' && effectiveOutput() !== 'bluetooth') {
-      showAlert('Нічну сесію можна почати лише з Bluetooth-гарнітурою.');
-      return;
-    }
     showAlert('');
     if (mode === 'night') {
       const engine = createAcousticEngine({
@@ -1008,14 +998,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     for (const mode of ['night', 'day']) {
       const active = Boolean(s) && s.mode === mode;
       const blocked = Boolean(s) && s.mode !== mode;
-      const needsBluetooth = mode === 'night' && !s && effectiveOutput() !== 'bluetooth';
       const label = mode === 'night' ? 'нічну' : 'денну';
       $(`${mode}-timer`).textContent = formatClock(active ? s.seconds : 0);
       $(`${mode}-status`).textContent = active ? (s.status || 'Сесія триває') : blocked ? 'Іншу сесію запущено'
-        : needsBluetooth ? 'Підключіть Bluetooth-гарнітуру й натисніть «Перевірити»' : 'Сесію не запущено';
+        : 'Сесію не запущено';
       $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : `Почати ${label} сесію`;
-      $(`${mode}-toggle`).disabled = blocked || needsBluetooth;
-      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsBluetooth);
+      $(`${mode}-toggle`).disabled = blocked;
+      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked);
     }
     renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
