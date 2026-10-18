@@ -197,21 +197,23 @@ const ENGINE_CONFIG = Object.freeze({
   HIGHPASS_HZ: 80,
   LOWPASS_HZ: 800,
   FILTER_Q: Math.SQRT1_2,
-  FFT_SIZE: 1024,
-  ANALYSIS_INTERVAL_MS: 40,
-  ENVELOPE_SMOOTHING: 0.3,
+  // Аналіз раз на секунду: буфер RMS максимальний (≈0.7 с звуку), а коефіцієнти згладжування розраховані на один виклик на секунду
+  FFT_SIZE: 32768,
+  SPECTRUM_FFT_SIZE: 1024,
+  ANALYSIS_INTERVAL_MS: 1000,
+  ENVELOPE_SMOOTHING: 0.7,
   CALIBRATION_MS: 3000,
-  CALIBRATION_SMOOTHING: 0.1,
-  FLOOR_SMOOTHING: 0.01,
+  CALIBRATION_SMOOTHING: 0.4,
+  FLOOR_SMOOTHING: 0.1,
   MIN_TRIGGER_RMS: 0.002,
   TRIGGER_RATIO: 3,
   RELEASE_RATIO: 2,
-  GAP_BRIDGE_MS: 150,
+  GAP_BRIDGE_MS: 1500,
   // Хропіння — низькочастотна енергія: середня потужність перших LOW_BINS бінів відносно середньої потужності всього спектра
   LOW_BINS: 15,
   LOW_ENERGY_RATIO: 27,
-  RATIO_SMOOTHING: 0.3,
-  SPECTRUM_SMOOTHING: 0.5,
+  RATIO_SMOOTHING: 0.6,
+  SPECTRUM_SMOOTHING: 0,
   // Ритм дихання: мінімум MIN_BURSTS поспіль сплесків по 1–3 с з паузами до 4 с; довша тиша скидає лічильник
   BURST_MIN_MS: 1000,
   BURST_MAX_MS: 3000,
@@ -253,7 +255,6 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
-  RMS_LOG_INTERVAL_MS: 500,
   AI_GAP_BRIDGE_MS: 1200,
   AI_STALE_MS: 2500
 });
@@ -730,10 +731,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     const rms = Math.sqrt(sum / buffer.length);
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
-    if (now - st.lastRmsLogAt >= C.RMS_LOG_INTERVAL_MS) {
-      st.lastRmsLogAt = now;
-      console.log(`[VIO Тест] Поточний RMS = ${rms.toFixed(5)}`);
-    }
+    console.error(`[VIO АКТУАЛЬНО] Поточний RMS = ${rms.toFixed(5)} | Бекенд TF: ${typeof tf === 'undefined' ? 'не завантажено' : tf.getBackend()}`);
     st.lowRatio += C.RATIO_SMOOTHING * (measureLowRatio() - st.lowRatio);
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
@@ -789,7 +787,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     node.fftSize = C.FFT_SIZE;
     // Спектр беремо до фільтрів: інакше смуга 80–800 Гц сама зробила б будь-який звук «низькочастотним»
     const spectrumNode = context.createAnalyser();
-    spectrumNode.fftSize = C.FFT_SIZE;
+    spectrumNode.fftSize = C.SPECTRUM_FFT_SIZE;
     spectrumNode.smoothingTimeConstant = C.SPECTRUM_SMOOTHING;
     source.connect(spectrumNode);
     source.connect(highpass);
@@ -808,7 +806,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     buffer = new Float32Array(node.fftSize);
     spectrumBuffer = new Float32Array(spectrumNode.frequencyBinCount);
     st = {
-      startedAt: performance.now(), lastRmsLogAt: 0, floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
+      startedAt: performance.now(), floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
       isActive: false, bursts: 0, lastBurstEnd: 0, episode: null,
       ai: {
         isReady: false, isBusy: false, isSnore: false, updatedAt: 0, filled: 0, writeIndex: 0,
