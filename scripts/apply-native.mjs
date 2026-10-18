@@ -6,6 +6,7 @@ const MANIFEST_PATH = 'android/app/src/main/AndroidManifest.xml';
 const JAVA_FILES = ['MainActivity.java', 'AudioRoutePlugin.java', 'VioSessionPlugin.java', 'VioForegroundService.java'];
 const PERMISSIONS = [
   'android.permission.RECORD_AUDIO',
+  'android.permission.CAMERA',
   'android.permission.MODIFY_AUDIO_SETTINGS',
   'android.permission.VIBRATE',
   'android.permission.WAKE_LOCK',
@@ -13,7 +14,9 @@ const PERMISSIONS = [
   'android.permission.FOREGROUND_SERVICE_MICROPHONE',
   'android.permission.POST_NOTIFICATIONS'
 ];
-const SERVICE_NAME = '.VioForegroundService';
+// Без required="false" Google Play відсікає пристрої без камери, а камера потрібна лише для Face-Tracking-симуляції
+const CAMERA_FEATURE_TAG = '<uses-feature android:name="android.hardware.camera" android:required="false" />';
+const SERVICE_NAME ='.VioForegroundService';
 const SERVICE_TAG = `<service android:name="${SERVICE_NAME}" android:exported="false" android:foregroundServiceType="microphone" />`;
 
 function fail(message) {
@@ -35,6 +38,9 @@ const missingPermissions = PERMISSIONS.filter((name) => !manifest.includes(`andr
 if (missingPermissions.length > 0) {
   const block = missingPermissions.map((name) => `<uses-permission android:name="${name}" />`).join('\n    ');
   manifest = manifest.replace('<application', () => `${block}\n\n    <application`);
+}
+if (!manifest.includes('android:name="android.hardware.camera"')) {
+  manifest = manifest.replace('<application', () => `${CAMERA_FEATURE_TAG}\n\n    <application`);
 }
 if (!manifest.includes(`android:name="${SERVICE_NAME}"`)) {
   manifest = manifest.replace('</application>', () => `${SERVICE_TAG}\n    </application>`);
