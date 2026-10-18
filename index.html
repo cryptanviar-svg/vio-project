@@ -255,6 +255,8 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
+  AI_TEST_MODE: true,
+  AI_TEST_MIN_SCORE: 0.5,
   SLOW_CALL_MS: 5,
   // Три кадри поспіль з RMS = 0 означають мертвий аудіопотік: його перезапускають; інженерний тест примусово дає хропіння на FORCED_SNORE_MS
   MIC_SILENT_FRAMES: 3,
@@ -658,9 +660,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
       const top = scores.reduce((best, score, index) => (score > best.score ? { index, score } : best), { index: 0, score: -1 });
       console.log(`[VIO Тест] Клас: ${AI_CLASS_NAMES[top.index] || `#${top.index}`}, Score: ${top.score.toFixed(3)}`);
-      const others = Math.max(scores[C.AI_SPEECH_CLASS], scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
-      ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
+      const speech = scores[C.AI_SPEECH_CLASS];
+      const others = Math.max(speech, scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
+      const isTestHit = Math.max(snoring, speech) > C.AI_TEST_MIN_SCORE;
+      ai.isSnore = C.AI_TEST_MODE ? isTestHit : snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
       ai.updatedAt = performance.now();
+      // ТИМЧАСОВО (AI_TEST_MODE): Snoring або Speech понад поріг одразу запускає Рефлекс 1, без правила про три сплески
+      if (C.AI_TEST_MODE && isTestHit && st === session && !session.episode) startEpisode(ai.updatedAt);
     } catch (err) {
       console.error('[VIO АКТУАЛЬНО] Помилка класифікації YAMNet:', err);
       ai.isReady = false;
