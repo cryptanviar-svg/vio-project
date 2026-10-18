@@ -252,7 +252,7 @@ const ENGINE_CONFIG = Object.freeze({
   AI_LAUGHTER_CLASS: 13,
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
-  AI_SNORE_MIN_SCORE: 0.7,
+  AI_SNORE_MIN_SCORE: 0.52,
   AI_GAP_BRIDGE_MS: 600,
   AI_STALE_MS: 1500
 });
@@ -627,6 +627,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     try {
       const scores = await scoreWindow(YamnetStore.model, latestWindow());
       const snoring = scores[C.AI_SNORING_CLASS];
+      console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
       const others = Math.max(scores[C.AI_SPEECH_CLASS], scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
       ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
       ai.updatedAt = performance.now();
