@@ -1284,6 +1284,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const MEDIAPIPE_WASM_DIR = './vendor/mediapipe/wasm';
   const FACE_MODEL_URL = './vendor/mediapipe/face_landmarker.task';
   const GRID_DIVISIONS = 4;
+  // Трафарет (еліпси в частках розміру canvas): овал голови та відкритого рота для вправи з піднебінням
+  const TEMPLATE_EXERCISE_ID = 'tongue';
+  const HEAD_TEMPLATE = { x: 0.5, y: 0.46, rx: 0.33, ry: 0.4 };
+  const MOUTH_TEMPLATE = { x: 0.5, y: 0.68, rx: 0.16, ry: 0.09 };
+  const TEMPLATE_TOLERANCE = 1.25;
+  const TEMPLATE_COLOR = 'rgba(255, 255, 255, 0.55)';
+  const TEMPLATE_LINE_PX = 3;
   const MARK_COLOR = '#34d399';
   const MARK_OK_COLOR = '#00FF00';
   const MARK_BAD_COLOR = '#FF0000';
@@ -1526,6 +1533,38 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return isOk ? MARK_OK_COLOR : MARK_BAD_COLOR;
   }
 
+  function isTemplateActive() {
+    return Boolean(running) && running.id === TEMPLATE_EXERCISE_ID;
+  }
+
+  function drawTemplate(ctx, width, height) {
+    ctx.strokeStyle = TEMPLATE_COLOR;
+    ctx.lineWidth = TEMPLATE_LINE_PX * (window.devicePixelRatio || 1);
+    [HEAD_TEMPLATE, MOUTH_TEMPLATE].forEach((shape) => {
+      ctx.beginPath();
+      ctx.ellipse(shape.x * width, shape.y * height, shape.rx * width, shape.ry * height, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    ctx.lineWidth = 1;
+  }
+
+  function isInsideEllipse(point, shape) {
+    const dx = (point.x - shape.x) / (shape.rx * TEMPLATE_TOLERANCE);
+    const dy = (point.y - shape.y) / (shape.ry * TEMPLATE_TOLERANCE);
+    return dx * dx + dy * dy <= 1;
+  }
+
+  // Обличчя в трафареті: кути очей в овалі голови, а контур губ — в овалі рота
+  function isFaceInTemplate() {
+    const canvas = $('cam-canvas');
+    if (cam.marks.length === 0 || canvas.width === 0 || canvas.height === 0) return false;
+    return cam.marks.every((mark) => {
+      const p = toCanvasPoint(mark, canvas.width, canvas.height);
+      const point = { x: p.x / canvas.width, y: p.y / canvas.height };
+      return isInsideEllipse(point, mark.kind === 'jaw' ? MOUTH_TEMPLATE : HEAD_TEMPLATE);
+    });
+  }
+
   // Усі цятки й контур мають один колір: зелений, лише коли і кут, і амплітуда в нормі, інакше червоний
   function drawMarks(ctx, width, height) {
     const radius = MARK_RADIUS_PX * (window.devicePixelRatio || 1);
@@ -1555,6 +1594,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!cam.stream) return;
     drawGrid(ctx, canvas.width, canvas.height);
+    if (isTemplateActive()) drawTemplate(ctx, canvas.width, canvas.height);
     drawMarks(ctx, canvas.width, canvas.height);
   }
 
@@ -1623,6 +1663,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     const holdStartedAt = isNormal ? (running.holdStartedAt === null ? now : running.holdStartedAt) : null;
     running = { ...running, holdStartedAt };
     if (holdStartedAt === null) {
+      if (isTemplateActive()) {
+        setExerciseStatus(`Помістіть обличчя й відкритий рот у білий контур, кут ${TILT_NORM_MIN_DEG}°–${TILT_NORM_MAX_DEG}°, рот від ${AMPLITUDE_NORM_MIN}%`);
+        return;
+      }
       setExerciseStatus(`Тримайте кут ${TILT_NORM_MIN_DEG}°–${TILT_NORM_MAX_DEG}° і рот відкритим від ${AMPLITUDE_NORM_MIN}%`);
       return;
     }
@@ -1637,7 +1681,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   function analyzeJaw() {
     const metrics = readFaceMetrics();
     cam.marks = metrics.landmarks ? buildMarks(metrics.landmarks) : [];
-    cam.verdict = { isNormal: metrics.isNormal };
+    const isNormal = metrics.isNormal && (!isTemplateActive() || isFaceInTemplate());
+    cam.verdict = { isNormal };
     if (metrics.amplitude === null) {
       renderMetricLine('cam-angle', 'Кут нахилу: —', null);
       renderMetricLine('cam-amp', 'Амплітуда: обличчя не знайдено — наведіть камеру на обличчя', false);
@@ -1649,7 +1694,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
         ? 'Чудово, тримайте!' : `Відкрийте рот ширше (мінімум ${AMPLITUDE_NORM_MIN}%)!`}`, metrics.isAmplitudeOk);
     }
     drawOverlay();
-    if (isCounting()) trackHold(metrics.isNormal);
+    if (isCounting()) trackHold(isNormal);
   }
 
   function cameraErrorMessage(err) {
