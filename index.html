@@ -255,6 +255,9 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
+  // ТИМЧАСОВО (залізний тест): будь-який RMS вище HARDWARE_TEST_MIN_RMS одразу запускає Рефлекс 1, без YAMNet і правил детекції
+  HARDWARE_TEST_MODE: true,
+  HARDWARE_TEST_MIN_RMS: 0.001,
   AI_TEST_MODE: true,
   AI_TEST_MIN_SCORE: 0.5,
   SLOW_CALL_MS: 5,
@@ -780,6 +783,11 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     const rms = Math.sqrt(sum / buffer.length);
     detectSilentStream(rms, now);
+    const isHardwareHit = C.HARDWARE_TEST_MODE && rms > C.HARDWARE_TEST_MIN_RMS;
+    if (isHardwareHit && !st.episode) {
+      console.error('[VIO СИГНАЛ] ЗАЛІЗО АКТИВОВАНЕ ЧЕРЕЗ RMS!');
+      startEpisode(now);
+    }
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
     console.error(`[VIO АКТУАЛЬНО] Поточний RMS = ${rms.toFixed(5)} | Бекенд TF: ${typeof tf === 'undefined' ? 'не завантажено' : tf.getBackend()}`);
     st.lowRatio += C.RATIO_SMOOTHING * (measureLowRatio() - st.lowRatio);
@@ -789,6 +797,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       return;
     }
     trackBursts(now);
+    if (isHardwareHit) st.isActive = true;
     updateEpisode(now);
   }
 
