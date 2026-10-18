@@ -78,7 +78,7 @@
       <p class="px-2 text-xs leading-relaxed text-zinc-300">
         Нічна сесія слухає мікрофон: хропіння запускає серію кліків (Рефлекс 1), а при тривалому хропінні —
         наростаючий гул і пульсуючу вібрацію (Рефлекс 2). Якщо Bluetooth зникне,
-        звук і вібрація перейдуть на динамік смартфона, подію буде записано в «Звіти».
+        звук і вібрація вимкнуться, мікрофон слухатиме далі, а з поверненням гарнітури звук відновиться; подію буде записано в «Звіти».
         За бездіяльності екран маскується чорним для економії OLED.
       </p>
     </section>
@@ -215,6 +215,7 @@ const ENGINE_CONFIG = Object.freeze({
   ATTACK_MAX_MS: 30000,
   LOCKOUT_MS: 10000,
   MASTER_GAIN: 1,
+  MUTE_RAMP_S: 0.05,
   STAGE1_MS: 3000,
   ATTACK_RAMP_S: 10,
   CLICK_HZ: 4000,
@@ -386,6 +387,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   let buffer = null;
   let timerId = null;
   let st = null;
+  let isMuted = false;
 
   function setStatus(text) {
     if (st.status === text) return;
@@ -403,7 +405,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   // Вібрація пульсує в такт гулу; патерн на весь етап наростання повторюється, доки триває епізод
   function pulseVibration(ep, now) {
-    if (now < ep.nextVibAt) return;
+    if (isMuted || now < ep.nextVibAt) return;
     const chunkMs = (C.ATTACK_RAMP_S * 1000) - C.STAGE1_MS;
     ep.nextVibAt = now + chunkMs;
     if (typeof navigator.vibrate === 'function') {
@@ -560,7 +562,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     highpass.connect(lowpass);
     lowpass.connect(node);
     const out = context.createGain();
-    out.gain.value = C.MASTER_GAIN;
+    out.gain.value = isMuted ? 0 : C.MASTER_GAIN;
     out.connect(context.destination);
 
     ctx = context;
@@ -581,6 +583,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   async function stop() {
     if (!ctx) return;
     clearInterval(timerId);
+    isMuted = false;
     if (st.episode) st.episode.attack.stop();
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     stream.getTracks().forEach((track) => track.stop());
@@ -618,7 +621,19 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     }
   }
 
-  return { start, stop, routeOutput };
+  // Повний Mute звуку й вібрації; мікрофон і детекція працюють далі. Після Unmute вібрація відновиться з наступним епізодом/чанком
+  function setMuted(shouldMute) {
+    isMuted = shouldMute;
+    if (typeof navigator.vibrate === 'function' && shouldMute) navigator.vibrate(0);
+    if (st && st.episode) st.episode.nextVibAt = 0;
+    if (!ctx || !master) return;
+    const t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.setValueAtTime(master.gain.value, t);
+    master.gain.linearRampToValueAtTime(shouldMute ? 0 : C.MASTER_GAIN, t + C.MUTE_RAMP_S);
+  }
+
+  return { start, stop, routeOutput, setMuted };
 }
 </script>
 
@@ -855,7 +870,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     renderReports();
   }
 
-  // Втрата Bluetooth не зупиняє сесію: звук і вібрація йдуть на вбудований динамік (резерв)
+  // Втрата Bluetooth не зупиняє сесію: звук і вібрація повністю вимикаються (Mute), мікрофон слухає далі; з поверненням гарнітури звук відновлюється
   async function enforceFailSafe() {
     const s = state.session;
     if (!s || s.mode !== 'night' || !state.engine) return;
@@ -863,18 +878,14 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (!isOnBluetooth && !s.isOnFallback) {
       s.isOnFallback = true;
       s.fallbacks += 1;
-      showAlert('Fail-Safe: Bluetooth-вихід втрачено. Звук і вібрацію переведено на динамік смартфона.');
-      const result = await state.engine.routeOutput('speaker');
-      logEvent(result.ok
-        ? 'Bluetooth-вихід втрачено — аудіо та вібрацію перенаправлено на вбудований динамік смартфона (резерв)'
-        : `Bluetooth-вихід втрачено — перемикання на динамік не вдалося: ${result.reason}`);
+      state.engine.setMuted(true);
+      showAlert('Fail-Safe: Bluetooth-вихід втрачено. Звук і вібрацію вимкнено, мікрофон слухає далі.');
+      logEvent('Bluetooth-вихід втрачено — звук і вібрацію повністю вимкнено (Mute), мікрофон продовжує слухати');
     } else if (isOnBluetooth && s.isOnFallback) {
       s.isOnFallback = false;
+      state.engine.setMuted(false);
       showAlert('');
-      const result = await state.engine.routeOutput('default');
-      logEvent(result.ok
-        ? 'Bluetooth-вихід відновлено — аудіо повернуто на гарнітуру'
-        : `Bluetooth-вихід відновлено — повернення виходу не вдалося: ${result.reason}`);
+      logEvent('Bluetooth-вихід відновлено — звук і вібрацію знову увімкнено');
     }
   }
 
