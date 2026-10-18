@@ -256,6 +256,9 @@ const ENGINE_CONFIG = Object.freeze({
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
   SLOW_CALL_MS: 5,
+  // Три кадри поспіль з RMS = 0 означають мертвий аудіопотік: його перезапускають; інженерний тест примусово дає хропіння на FORCED_SNORE_MS
+  MIC_SILENT_FRAMES: 3,
+  FORCED_SNORE_MS: 3000,
   AI_GAP_BRIDGE_MS: 1200,
   AI_STALE_MS: 2500
 });
@@ -492,7 +495,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRunningChange }) {
+function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRunningChange, onSilent }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -634,6 +637,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   async function classify() {
     const session = st;
     const ai = session.ai;
+    if (performance.now() < ai.forcedUntil) return;
     if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
     const quietLevel = Math.max(C.MIN_TRIGGER_RMS / 2, session.floor * C.RELEASE_RATIO);
     if (session.env < quietLevel) {
@@ -708,7 +712,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     const isAiFresh = ai.isReady && now - ai.updatedAt < C.AI_STALE_MS;
     const isSnoreSound = isAiFresh ? ai.isSnore : st.lowRatio >= C.LOW_ENERGY_RATIO;
     const bridgeMs = ai.isReady ? C.AI_GAP_BRIDGE_MS : C.GAP_BRIDGE_MS;
-    const isAbove = isSnoreSound && (st.seg ? st.env > release : !isLockedOut && st.env > trigger);
+    const isForced = now < ai.forcedUntil;
+    const isAbove = isForced || (isSnoreSound && (st.seg ? st.env > release : !isLockedOut && st.env > trigger));
     st.isActive = isAbove;
 
     if (isAbove) {
@@ -735,6 +740,24 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     setStatus('Слухаю');
   }
 
+  // RMS = 0 кілька кадрів поспіль: аудіопотік мертвий (типово зависла Bluetooth-гарнітура); просимо перезапустити двигун
+  function detectSilentStream(rms, now) {
+    st.silentFrames = rms === 0 && now >= st.ai.forcedUntil ? st.silentFrames + 1 : 0;
+    if (st.silentFrames < C.MIC_SILENT_FRAMES || st.isSilenceReported) return;
+    st.isSilenceReported = true;
+    setStatus('Мікрофон мовчить (RMS = 0): перезапускаю аудіопотік…');
+    onSilent();
+  }
+
+  // Примусово вважає звук хропінням на durationMs, ігноруючи сирий RMS (для інженерного тесту)
+  function forceSnore(durationMs) {
+    if (!st) return;
+    const now = performance.now();
+    st.ai.forcedUntil = now + durationMs;
+    st.ai.isSnore = true;
+    st.ai.updatedAt = now;
+  }
+
   // Обгортка вимірює тривалість кадру аналізу, щоб знайти джерело [Violation] у консолі
   function analyze() {
     const startedAt = performance.now();
@@ -748,6 +771,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     const rms = Math.sqrt(sum / buffer.length);
+    detectSilentStream(rms, now);
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
     console.error(`[VIO АКТУАЛЬНО] Поточний RMS = ${rms.toFixed(5)} | Бекенд TF: ${typeof tf === 'undefined' ? 'не завантажено' : tf.getBackend()}`);
     st.lowRatio += C.RATIO_SMOOTHING * (measureLowRatio() - st.lowRatio);
@@ -827,9 +851,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       startedAt: performance.now(), floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
       isActive: false, bursts: 0, lastBurstEnd: 0, episode: null,
       ai: {
-        isReady: false, isBusy: false, isSnore: false, updatedAt: 0, filled: 0, writeIndex: 0,
+        isReady: false, isBusy: false, isSnore: false, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
+      silentFrames: 0, isSilenceReported: false,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
@@ -904,7 +929,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     return Boolean(stream) && stream.getAudioTracks().some((track) => track.readyState === 'live');
   }
 
-  return { start, stop, routeOutput, setMuted, isRunning, isMicLive };
+  return { start, stop, routeOutput, setMuted, isRunning, isMicLive, forceSnore };
 }
 </script>
 
@@ -920,6 +945,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   const MAX_STORED_SESSIONS = 200;
   const EVENTS_KEY = 'vio.events';
   const MAX_STORED_EVENTS = 200;
+  const MAX_MIC_RESTARTS = 3;
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
   // У нативній оболонці Capacitor тип аудіовиходу й фоновий сервіс дає Android; у браузері цих плагінів немає
   const isNative = Boolean(window.Capacitor && typeof window.Capacitor.registerPlugin === 'function'
@@ -949,6 +975,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     isWakeLockPending: false,
     isWakeLockWarned: false,
     isStarting: false,
+    isRestarting: false,
+    micRestarts: 0,
     isServiceRunning: false,
     tickId: null,
     maskIdleId: null,
@@ -1126,6 +1154,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   async function onSimulate() {
     const button = $('test-snore-btn');
     button.disabled = true;
+    if (state.engine) state.engine.forceSnore(ENGINE_CONFIG.FORCED_SNORE_MS);
     $('sim-status').textContent = 'Симуляція 10 с: Рефлекс 1 (кліки 4 кГц) → Рефлекс 2 (гул 150–250 Гц і пульсуюча вібрація)…';
     let text;
     try {
@@ -1265,17 +1294,58 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     logEvent('Аудіоядро не працює — фонове сповіщення знято');
   }
 
+  function buildEngine() {
+    return createAcousticEngine({
+      isBluetoothLabel: (label) => BLUETOOTH_PATTERN.test(label),
+      onLog: logEvent,
+      onStatus: setSessionStatus,
+      onLost: handleMicLost,
+      onRunningChange: syncBackgroundService,
+      onSilent: restartEngine
+    });
+  }
+
+  // Мертвий аудіопотік: зупиняємо доріжки мікрофона й створюємо двигун заново, що «пересмикує» потік у WebView і гарнітуру
+  async function restartEngine() {
+    const s = state.session;
+    if (!s || s.mode !== 'night' || state.isRestarting) return;
+    if (state.micRestarts >= MAX_MIC_RESTARTS) {
+      logEvent(`Мікрофон мовчить навіть після ${MAX_MIC_RESTARTS} перезапусків — перевірте гарнітуру й дозвіл`);
+      showAlert('Мікрофон мовчить: перевірте гарнітуру, дозвіл і чи не зайнятий мікрофон іншим застосунком.');
+      return;
+    }
+    state.micRestarts += 1;
+    state.isRestarting = true;
+    logEvent(`Мікрофон мовчить (RMS = 0) — перезапуск аудіопотоку, спроба ${state.micRestarts} з ${MAX_MIC_RESTARTS}`);
+    const old = state.engine;
+    state.engine = null;
+    try {
+      if (old) await old.stop();
+      const engine = buildEngine();
+      await engine.start();
+      if (state.session !== s) {
+        await engine.stop();
+        return;
+      }
+      state.engine = engine;
+      if (s.isOnFallback) engine.setMuted(true);
+      syncBackgroundService();
+    } catch (err) {
+      console.error('VIO: не вдалося перезапустити аудіопотік', err);
+      logEvent(`Перезапуск мікрофона не вдався: ${err.message}`);
+      stopSession('failsafe');
+      showAlert(`Fail-Safe: ${err.message} Нічну сесію зупинено.`);
+    } finally {
+      state.isRestarting = false;
+    }
+  }
+
   async function startSession(mode) {
     if (state.session || state.isStarting) return;
     showAlert('');
     if (mode === 'night') {
-      const engine = createAcousticEngine({
-        isBluetoothLabel: (label) => BLUETOOTH_PATTERN.test(label),
-        onLog: logEvent,
-        onStatus: setSessionStatus,
-        onLost: handleMicLost,
-        onRunningChange: syncBackgroundService
-      });
+      const engine = buildEngine();
+      state.micRestarts = 0;
       state.isStarting = true;
       try {
         await engine.start();
