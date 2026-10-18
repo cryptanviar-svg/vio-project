@@ -245,7 +245,7 @@ const ENGINE_CONFIG = Object.freeze({
   YAMNET_URL: './vendor/yamnet/model.json',
   AI_SAMPLE_RATE: 16000,
   AI_WINDOW_SAMPLES: 15600,
-  AI_HOP_MS: 480,
+  AI_HOP_MS: 1000,
   AI_CAPTURE_BATCH: 2048,
   AI_CLASS_COUNT: 521,
   AI_SPEECH_CLASS: 0,
@@ -254,8 +254,8 @@ const ENGINE_CONFIG = Object.freeze({
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
   RMS_LOG_INTERVAL_MS: 500,
-  AI_GAP_BRIDGE_MS: 600,
-  AI_STALE_MS: 1500
+  AI_GAP_BRIDGE_MS: 1200,
+  AI_STALE_MS: 2500
 });
 
 const AI_CLASS_NAMES = {
@@ -307,6 +307,7 @@ function loadYamnet() {
   if (!YamnetStore.loading) {
     YamnetStore.loading = (async () => {
       if (typeof tf === 'undefined') await loadScriptOnce(ENGINE_CONFIG.TFJS_URL);
+      if (!(await tf.setBackend('webgl'))) console.error('VIO: бекенд WebGL недоступний, TensorFlow.js працює на резервному');
       await tf.ready();
       const model = await tf.loadGraphModel(ENGINE_CONFIG.YAMNET_URL);
       const warmInput = tf.zeros([ENGINE_CONFIG.AI_WINDOW_SAMPLES]);
