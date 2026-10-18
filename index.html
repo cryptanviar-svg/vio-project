@@ -118,7 +118,7 @@
         <div id="cam-status" aria-live="polite" class="mt-3 space-y-2 px-2 text-sm">
           <p>
             <span id="cam-angle" class="font-medium text-white">Кут нахилу: —</span>
-            <span class="text-xs text-zinc-200">(Тримайте голову рівно, норма до 5°)</span>
+            <span class="text-xs text-zinc-200">(Тримайте голову під кутом 4°–6°)</span>
           </p>
           <p>
             <span id="cam-amp" class="font-medium text-white">Амплітуда: —</span>
@@ -497,6 +497,11 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     st.floor = st.floor === 0 ? st.env : st.floor + C.CALIBRATION_SMOOTHING * (st.env - st.floor);
     if (now - st.startedAt < C.CALIBRATION_MS) return;
     st.isCalibrated = true;
+    if (st.peakEnv === 0) {
+      setStatus('Мікрофон мовчить (RMS = 0): перевірте дозвіл і чи не зайнятий він іншим застосунком');
+      onLog(`Діагностика: аудіопотік порожній (RMS = 0) за ${C.CALIBRATION_MS / 1000} с після старту`);
+      return;
+    }
     setStatus('Слухаю');
   }
 
@@ -506,6 +511,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     st.env += C.ENVELOPE_SMOOTHING * (Math.sqrt(sum / buffer.length) - st.env);
+    if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
       calibrate(now);
       return;
@@ -564,7 +570,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     master = out;
     buffer = new Float32Array(node.fftSize);
     st = {
-      startedAt: performance.now(), floor: 0, env: 0, seg: null, lastAbove: 0, episode: null,
+      startedAt: performance.now(), floor: 0, env: 0, peakEnv: 0, seg: null, lastAbove: 0, episode: null,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
@@ -1249,13 +1255,18 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const AXIS_Y = [0.3, 0.45, 0.6];
   const MARK_JITTER = 0.012;
   const MARK_RADIUS_PX = 4;
-  const MAX_TILT_DEG = 4;
-  const TILT_NORM_DEG = 5;
-  const AMPLITUDE_NORM_MIN = 85;
-  const AMPLITUDE_MIN = 90;
-  const AMPLITUDE_MAX = 99;
+  const TILT_NORM_MIN_DEG = 4;
+  const TILT_NORM_MAX_DEG = 6;
+  const TILT_SIM_OFF_MIN_DEG = 1;
+  const TILT_SIM_OFF_MAX_DEG = 9;
+  const AMPLITUDE_NORM_MIN = 95;
+  const AMPLITUDE_SIM_OFF_MIN = 80;
+  const AMPLITUDE_MAX = 100;
+  const SIM_DEVIATION_CHANCE = 0.03;
   const GRID_DIVISIONS = 4;
   const MARK_COLOR = '#34d399';
+  const MARK_OK_COLOR = '#00FF00';
+  const MARK_BAD_COLOR = '#FF0000';
   const GRID_COLOR = 'rgba(255, 255, 255, 0.14)';
 
   const $ = (id) => document.getElementById(id);
@@ -1263,7 +1274,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   let tone = 0;
   let running = null;
   let runCounter = 0;
-  const cam = { stream: null, attempt: 0, trackId: null, marks: [] };
+  const cam = { stream: null, attempt: 0, trackId: null, marks: [], verdict: null };
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -1488,9 +1499,17 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     ctx.stroke();
   }
 
+  function verdictColor(isOk) {
+    if (isOk === null) return MARK_COLOR;
+    return isOk ? MARK_OK_COLOR : MARK_BAD_COLOR;
+  }
+
+  // Точки щелепи показують амплітуду, точки осі обличчя — кут нахилу
   function drawMarks(ctx, width, height) {
     const radius = MARK_RADIUS_PX * (window.devicePixelRatio || 1);
-    ctx.strokeStyle = MARK_COLOR;
+    const jawColor = verdictColor(cam.verdict ? cam.verdict.isAmplitudeOk : null);
+    const axisColor = verdictColor(cam.verdict ? cam.verdict.isTiltOk : null);
+    ctx.strokeStyle = jawColor;
     ctx.globalAlpha = 0.5;
     ctx.beginPath();
     cam.marks.slice(0, JAW_POINTS).forEach((p, i) => {
@@ -1499,8 +1518,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     });
     ctx.stroke();
     ctx.globalAlpha = 1;
-    ctx.fillStyle = MARK_COLOR;
-    cam.marks.forEach((p) => {
+    cam.marks.forEach((p, i) => {
+      ctx.fillStyle = i < JAW_POINTS ? jawColor : axisColor;
       ctx.beginPath();
       ctx.arc(p.x * width, p.y * height, radius, 0, Math.PI * 2);
       ctx.fill();
@@ -1528,18 +1547,40 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     drawOverlay();
   }
 
-  // Єдина точка, яку треба замінити справжнім аналізом обличчя; зараз значення симулюються в межах норми
+  function randomBetween(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  // Єдина точка, яку треба замінити справжнім аналізом обличчя; зараз значення симулюються
+  // в межах норми, зі спорадичними виходами за неї, щоб було видно червоний стан
   function readFaceMetrics() {
-    const tilt = Math.random() * MAX_TILT_DEG;
-    const amplitude = AMPLITUDE_MIN + Math.floor(Math.random() * (AMPLITUDE_MAX - AMPLITUDE_MIN + 1));
-    return { tilt, amplitude, isNormal: tilt <= TILT_NORM_DEG && amplitude >= AMPLITUDE_NORM_MIN };
+    const isTiltOff = Math.random() < SIM_DEVIATION_CHANCE;
+    const isAmplitudeOff = Math.random() < SIM_DEVIATION_CHANCE;
+    const tilt = isTiltOff
+      ? randomBetween(TILT_SIM_OFF_MIN_DEG, TILT_SIM_OFF_MAX_DEG)
+      : randomBetween(TILT_NORM_MIN_DEG, TILT_NORM_MAX_DEG);
+    const amplitude = Math.round(isAmplitudeOff
+      ? randomBetween(AMPLITUDE_SIM_OFF_MIN, AMPLITUDE_NORM_MIN - 1)
+      : randomBetween(AMPLITUDE_NORM_MIN, AMPLITUDE_MAX));
+    const isTiltOk = tilt >= TILT_NORM_MIN_DEG && tilt <= TILT_NORM_MAX_DEG;
+    const isAmplitudeOk = amplitude >= AMPLITUDE_NORM_MIN;
+    return { tilt, amplitude, isTiltOk, isAmplitudeOk, isNormal: isTiltOk && isAmplitudeOk };
+  }
+
+  function renderMetricLine(id, text, isOk) {
+    const line = $(id);
+    line.textContent = text;
+    line.style.color = isOk === null ? '' : verdictColor(isOk);
   }
 
   function analyzeJaw() {
     const metrics = readFaceMetrics();
     cam.marks = buildMarks();
-    $('cam-angle').textContent = `Кут нахилу: ${metrics.tilt <= TILT_NORM_DEG ? 'ОК' : 'поза нормою'} (${metrics.tilt.toFixed(1)}°)`;
-    $('cam-amp').textContent = `Амплітуда: ${metrics.amplitude}%`;
+    cam.verdict = { isTiltOk: metrics.isTiltOk, isAmplitudeOk: metrics.isAmplitudeOk };
+    renderMetricLine('cam-angle', `Кут нахилу: ${metrics.tilt.toFixed(1)}° — ${metrics.isTiltOk
+      ? 'Норма (4°-6°)' : 'Нахиліть голову до 5°!'}`, metrics.isTiltOk);
+    renderMetricLine('cam-amp', `Амплітуда: ${metrics.amplitude}% — ${metrics.isAmplitudeOk
+      ? 'Чудово, тримайте!' : 'Відкрийте рот ширше (мінімум 95%)!'}`, metrics.isAmplitudeOk);
     drawOverlay();
     if (!isCounting()) return;
     running = { ...running, samples: running.samples + 1, isNormal: running.isNormal && metrics.isNormal };
@@ -1555,8 +1596,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     $('cam-toggle').textContent = isOn ? 'Вимкнути камеру' : 'Увімкнути камеру';
     $('cam-placeholder').classList.toggle('hidden', isOn);
     if (isOn) return;
-    $('cam-angle').textContent = 'Кут нахилу: —';
-    $('cam-amp').textContent = 'Амплітуда: —';
+    renderMetricLine('cam-angle', 'Кут нахилу: —', null);
+    renderMetricLine('cam-amp', 'Амплітуда: —', null);
   }
 
   function stopCamera() {
@@ -1566,6 +1607,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (cam.stream) cam.stream.getTracks().forEach((track) => track.stop());
     cam.stream = null;
     cam.marks = [];
+    cam.verdict = null;
     $('cam-video').srcObject = null;
     setCameraUi(false);
     drawOverlay();
