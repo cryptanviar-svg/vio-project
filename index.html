@@ -252,10 +252,18 @@ const ENGINE_CONFIG = Object.freeze({
   AI_LAUGHTER_CLASS: 13,
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
-  AI_SNORE_MIN_SCORE: 0.52,
+  AI_SNORE_MIN_SCORE: 0.5,
+  RMS_LOG_INTERVAL_MS: 500,
   AI_GAP_BRIDGE_MS: 600,
   AI_STALE_MS: 1500
 });
+
+const AI_CLASS_NAMES = {
+  [ENGINE_CONFIG.AI_SPEECH_CLASS]: 'Speech',
+  [ENGINE_CONFIG.AI_LAUGHTER_CLASS]: 'Laughter',
+  [ENGINE_CONFIG.AI_SNORING_CLASS]: 'Snoring',
+  [ENGINE_CONFIG.AI_COUGH_CLASS]: 'Cough'
+};
 
 /* Нейромережа YAMNet: модель, TensorFlow.js і воркліт захоплення лежать у vendor/ і працюють локально */
 const CAPTURE_WORKLET_NAME = 'vio-capture';
@@ -628,6 +636,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       const scores = await scoreWindow(YamnetStore.model, latestWindow());
       const snoring = scores[C.AI_SNORING_CLASS];
       console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
+      const top = scores.reduce((best, score, index) => (score > best.score ? { index, score } : best), { index: 0, score: -1 });
+      console.log(`[VIO Тест] Клас: ${AI_CLASS_NAMES[top.index] || `#${top.index}`}, Score: ${top.score.toFixed(3)}`);
       const others = Math.max(scores[C.AI_SPEECH_CLASS], scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
       ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
       ai.updatedAt = performance.now();
@@ -715,7 +725,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     analyser.getFloatTimeDomainData(buffer);
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
-    st.env += C.ENVELOPE_SMOOTHING * (Math.sqrt(sum / buffer.length) - st.env);
+    const rms = Math.sqrt(sum / buffer.length);
+    st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
+    if (now - st.lastRmsLogAt >= C.RMS_LOG_INTERVAL_MS) {
+      st.lastRmsLogAt = now;
+      console.log(`[VIO Тест] Поточний RMS = ${rms.toFixed(5)}`);
+    }
     st.lowRatio += C.RATIO_SMOOTHING * (measureLowRatio() - st.lowRatio);
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
@@ -790,7 +805,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     buffer = new Float32Array(node.fftSize);
     spectrumBuffer = new Float32Array(spectrumNode.frequencyBinCount);
     st = {
-      startedAt: performance.now(), floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
+      startedAt: performance.now(), lastRmsLogAt: 0, floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
       isActive: false, bursts: 0, lastBurstEnd: 0, episode: null,
       ai: {
         isReady: false, isBusy: false, isSnore: false, updatedAt: 0, filled: 0, writeIndex: 0,
