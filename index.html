@@ -95,7 +95,7 @@
              class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
           <div id="tone-fill" class="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all duration-500" style="width:0%"></div>
         </div>
-        <p id="tone-note" class="mt-3 text-xs text-zinc-300">Кожна завершена вправа додає +1%</p>
+        <p id="tone-note" class="mt-3 text-xs text-zinc-300">+1% за 5 с безперервного утримання кута 4°–6° і відкритого рота (від 95%)</p>
       </div>
 
       <ul id="exercise-list" class="space-y-2"></ul>
@@ -1244,7 +1244,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const TONE_KEY = 'vio.tone';
   const TONE_STEP = 1;
   const TONE_MAX = 100;
-  const TONE_NOTE_DEFAULT = 'Кожна завершена вправа додає +1%';
+  const TONE_NOTE_DEFAULT = '+1% за 5 с безперервного утримання кута 4°–6° і відкритого рота (від 95%)';
   const EXERCISE_SECONDS = 30;
   const EXERCISE_MS = EXERCISE_SECONDS * 1000;
   const EXERCISE_TICK_MS = 100;
@@ -1261,12 +1261,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     { id: 'palate', name: 'Підйом піднебіння', hint: 'Широко відкрийте рот і плавно промовляйте «а».' }
   ];
 
-  const TRACK_INTERVAL_MS = 500;
+  const TRACK_INTERVAL_MS = 200;
   const MARK_RADIUS_PX = 4;
   const TILT_NORM_MIN_DEG = 4;
   const TILT_NORM_MAX_DEG = 6;
-  const TILT_SIM_OFF_MIN_DEG = 1;
-  const TILT_SIM_OFF_MAX_DEG = 9;
+  const HOLD_MS = 5000;
+  const HOLD_SECONDS = HOLD_MS / 1000;
+  const RAD_TO_DEG = 180 / Math.PI;
   const AMPLITUDE_NORM_MIN = 95;
   const AMPLITUDE_MAX = 100;
   // Амплітуда = розкриття внутрішніх країв губ / відстань між зовнішніми кутами очей; це відношення при широко відкритому роті = 100%
@@ -1282,7 +1283,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const MEDIAPIPE_BUNDLE_URL = './vendor/mediapipe/vision_bundle.esm.js';
   const MEDIAPIPE_WASM_DIR = './vendor/mediapipe/wasm';
   const FACE_MODEL_URL = './vendor/mediapipe/face_landmarker.task';
-  const SIM_DEVIATION_CHANCE = 0.03;
   const GRID_DIVISIONS = 4;
   const MARK_COLOR = '#34d399';
   const MARK_OK_COLOR = '#00FF00';
@@ -1444,14 +1444,14 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     renderExercises();
   }
 
-  // Тонус зараховується лише якщо кут і амплітуда були в нормі в усіх замірах за 30 с
-  function completeExercise() {
-    const { id, timerId, isNormal, samples } = running;
+  // Тонус зараховується, щойно позицію (кут і амплітуда) втримано безперервно HOLD_MS; не вдалося за 30 с — не зараховується
+  function completeExercise(isSuccess) {
+    const { id, timerId } = running;
     clearInterval(timerId);
     running = null;
     renderExercises();
-    if (!isNormal || samples === 0) {
-      setExerciseStatus('Не зараховано: кут нахилу або амплітуда виходили за норму');
+    if (!isSuccess) {
+      setExerciseStatus(`Не зараховано: не вдалося безперервно втримати позицію ${HOLD_SECONDS} с`);
       return;
     }
     addTone();
@@ -1463,7 +1463,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   function tickExercise() {
     if (!isCounting()) return;
-    if (Date.now() - running.startedAt >= EXERCISE_MS) completeExercise();
+    if (Date.now() - running.startedAt >= EXERCISE_MS) completeExercise(false);
     else renderExercises();
   }
 
@@ -1473,7 +1473,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       return;
     }
     const runId = ++runCounter;
-    running = { id, runId, startedAt: null, timerId: null, isNormal: true, samples: 0 };
+    running = { id, runId, startedAt: null, timerId: null, holdStartedAt: null };
     setExerciseStatus('Вмикаю камеру…');
     renderExercises();
     $('cam-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1486,7 +1486,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       return;
     }
     running = { ...running, startedAt: Date.now(), timerId: setInterval(tickExercise, EXERCISE_TICK_MS) };
-    setExerciseStatus('Тримайте голову рівно й виконуйте вправу');
     analyzeJaw();
     renderExercises();
   }
@@ -1527,12 +1526,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return isOk ? MARK_OK_COLOR : MARK_BAD_COLOR;
   }
 
-  // Контур губ показує амплітуду (колір вердикту); кути очей — базова лінія масштабу обличчя
+  // Усі цятки й контур мають один колір: зелений, лише коли і кут, і амплітуда в нормі, інакше червоний
   function drawMarks(ctx, width, height) {
     const radius = MARK_RADIUS_PX * (window.devicePixelRatio || 1);
-    const jawColor = verdictColor(cam.verdict ? cam.verdict.isAmplitudeOk : null);
+    const markColor = verdictColor(cam.verdict ? cam.verdict.isNormal : null);
     const points = cam.marks.map((mark) => ({ ...toCanvasPoint(mark, width, height), kind: mark.kind }));
-    ctx.strokeStyle = jawColor;
+    ctx.strokeStyle = markColor;
     ctx.globalAlpha = 0.5;
     ctx.beginPath();
     points.filter((p) => p.kind === 'jaw').forEach((p, i) => {
@@ -1543,7 +1542,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     ctx.stroke();
     ctx.globalAlpha = 1;
     points.forEach((p) => {
-      ctx.fillStyle = p.kind === 'jaw' ? jawColor : MARK_COLOR;
+      ctx.fillStyle = markColor;
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fill();
@@ -1571,10 +1570,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     drawOverlay();
   }
 
-  function randomBetween(min, max) {
-    return min + Math.random() * (max - min);
-  }
-
   function landmarkDistance(a, b, width, height) {
     return Math.hypot((a.x - b.x) * width, (a.y - b.y) * height);
   }
@@ -1587,6 +1582,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return Math.round(Math.min(1, lipGap / eyeDistance / MOUTH_FULL_OPEN_RATIO) * AMPLITUDE_MAX);
   }
 
+  // Кут нахилу голови вбік: нахил лінії між зовнішніми кутами очей відносно горизонталі, за модулем
+  function measureTilt(landmarks, width, height) {
+    const left = landmarks[LANDMARK_EYE_LEFT_OUTER];
+    const right = landmarks[LANDMARK_EYE_RIGHT_OUTER];
+    return Math.abs(Math.atan2((right.y - left.y) * height, Math.abs(right.x - left.x) * width)) * RAD_TO_DEG;
+  }
+
   function detectFaceLandmarks() {
     const video = $('cam-video');
     const isVideoReady = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0;
@@ -1595,19 +1597,15 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return result.faceLandmarks.length > 0 ? result.faceLandmarks[0] : null;
   }
 
-  // Амплітуда рахується з реальних міток обличчя. Кут нахилу поки симулюється в межах норми,
-  // зі спорадичними виходами за неї, щоб було видно червоний стан
+  // Кут і амплітуда рахуються з реальних міток обличчя; без обличчя в кадрі вимірів немає і позиція вважається порушеною
   function readFaceMetrics() {
     const landmarks = detectFaceLandmarks();
     const video = $('cam-video');
     const amplitude = landmarks ? measureAmplitude(landmarks, video.videoWidth, video.videoHeight) : null;
     if (amplitude === null) {
-      return { landmarks: null, tilt: null, amplitude: null, isTiltOk: null, isAmplitudeOk: false, isNormal: false };
+      return { landmarks: null, tilt: null, amplitude: null, isTiltOk: false, isAmplitudeOk: false, isNormal: false };
     }
-    const isTiltOff = Math.random() < SIM_DEVIATION_CHANCE;
-    const tilt = isTiltOff
-      ? randomBetween(TILT_SIM_OFF_MIN_DEG, TILT_SIM_OFF_MAX_DEG)
-      : randomBetween(TILT_NORM_MIN_DEG, TILT_NORM_MAX_DEG);
+    const tilt = measureTilt(landmarks, video.videoWidth, video.videoHeight);
     const isTiltOk = tilt >= TILT_NORM_MIN_DEG && tilt <= TILT_NORM_MAX_DEG;
     const isAmplitudeOk = amplitude >= AMPLITUDE_NORM_MIN;
     return { landmarks, tilt, amplitude, isTiltOk, isAmplitudeOk, isNormal: isTiltOk && isAmplitudeOk };
@@ -1619,10 +1617,27 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     line.style.color = isOk === null ? '' : verdictColor(isOk);
   }
 
+  // Безперервне утримання ідеальної позиції: будь-яке порушення (і відсутність обличчя) скидає таймер
+  function trackHold(isNormal) {
+    const now = Date.now();
+    const holdStartedAt = isNormal ? (running.holdStartedAt === null ? now : running.holdStartedAt) : null;
+    running = { ...running, holdStartedAt };
+    if (holdStartedAt === null) {
+      setExerciseStatus(`Тримайте кут ${TILT_NORM_MIN_DEG}°–${TILT_NORM_MAX_DEG}° і рот відкритим від ${AMPLITUDE_NORM_MIN}%`);
+      return;
+    }
+    const heldMs = now - holdStartedAt;
+    if (heldMs >= HOLD_MS) {
+      completeExercise(true);
+      return;
+    }
+    setExerciseStatus(`Утримуйте позицію: ${Math.floor(heldMs / 1000)} з ${HOLD_SECONDS} с`);
+  }
+
   function analyzeJaw() {
     const metrics = readFaceMetrics();
     cam.marks = metrics.landmarks ? buildMarks(metrics.landmarks) : [];
-    cam.verdict = { isTiltOk: metrics.isTiltOk, isAmplitudeOk: metrics.isAmplitudeOk };
+    cam.verdict = { isNormal: metrics.isNormal };
     if (metrics.amplitude === null) {
       renderMetricLine('cam-angle', 'Кут нахилу: —', null);
       renderMetricLine('cam-amp', 'Амплітуда: обличчя не знайдено — наведіть камеру на обличчя', false);
@@ -1633,8 +1648,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
         ? 'Чудово, тримайте!' : 'Відкрийте рот ширше (мінімум 95%)!'}`, metrics.isAmplitudeOk);
     }
     drawOverlay();
-    if (!isCounting()) return;
-    running = { ...running, samples: running.samples + 1, isNormal: running.isNormal && metrics.isNormal };
+    if (isCounting()) trackHold(metrics.isNormal);
   }
 
   function cameraErrorMessage(err) {
