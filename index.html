@@ -651,7 +651,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       samples.fill(0);
       const snoring = scores[C.AI_SNORING_CLASS];
       const others = Math.max(scores[C.AI_SPEECH_CLASS], scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
-      ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
+      ai.isSnore = snoring > C.AI_SNORE_MIN_SCORE && snoring > others;
       ai.updatedAt = performance.now();
     } catch (err) {
       console.error('VIO: помилка класифікації YAMNet', err);
