@@ -738,7 +738,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
       });
     } catch (err) {
       console.error('VIO: помилка getUserMedia', err);
@@ -857,7 +857,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     master.gain.linearRampToValueAtTime(shouldMute ? 0 : C.MASTER_GAIN, t + C.MUTE_RAMP_S);
   }
 
-  return { start, stop, routeOutput, setMuted, isRunning };
+  // Мікрофонний потік двигуна живий: повторний запит до заліза не потрібен
+  function isMicLive() {
+    return Boolean(stream) && stream.getAudioTracks().some((track) => track.readyState === 'live');
+  }
+
+  return { start, stop, routeOutput, setMuted, isRunning, isMicLive };
 }
 </script>
 
@@ -1049,6 +1054,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   // Запит дозволу на мікрофон активує аудіо й намагається розкрити назви пристроїв
   async function requestDeviceLabels() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'granted';
+    // Під час нічної сесії мікрофон уже відкрито двигуном: другий getUserMedia Android WebView міг би заблокувати
+    if (state.engine && state.engine.isMicLive()) return 'granted';
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((t) => t.stop());
