@@ -225,17 +225,16 @@ const ENGINE_CONFIG = Object.freeze({
   MASTER_GAIN: 1,
   MUTE_RAMP_S: 0.05,
   STAGE1_MS: 3000,
-  ATTACK_RAMP_S: 10,
+  ATTACK_RAMP_S: 6,
   CLICK_HZ: 4000,
   CLICK_ON_MS: 50,
   CLICK_OFF_MS: 50,
   CLICK_EDGE_S: 0.003,
   CLICK_GAIN: 0.6,
-  HUM_MIN_HZ: 150,
-  HUM_MAX_HZ: 250,
-  HUM_START_GAIN: 0.2,
+  CLICK_PAN_LEFT: -1,
+  HUM_HZ: 350,
+  HUM_MICRO_GAIN: 0.0001,
   HUM_END_GAIN: 0.88,
-  HUM_FADE_IN_S: 0.03,
   PULSE_HZ: 4,
   PULSE_DEPTH: 0.3,
   PULSE_BASE: 0.7,
@@ -387,8 +386,10 @@ const VioAudio = (() => {
 })();
 
 /* Атака біофідбеку: спільна для двигуна та інженерного тесту (час — за годинником AudioContext).
-   Етап 1: кліки 4 кГц; етап 2: пульсуючий гул 150–250 Гц з ростом гучності до кінця ATTACK_RAMP_S */
+   Етап 1: кліки 4 кГц, що чергуються між лівим і правим каналом; етап 2: пульсуючий гул 350 Гц, що наростає з мікрорівня до кінця ATTACK_RAMP_S */
 const SIM_TOTAL_MS = ENGINE_CONFIG.ATTACK_RAMP_S * 1000;
+// Канал наступного кліка чергується і між атаками: кожен клік іде в інше вухо
+let nextClickPan = ENGINE_CONFIG.CLICK_PAN_LEFT;
 
 function scheduleClicks(context, destination, t0) {
   const C = ENGINE_CONFIG;
@@ -397,6 +398,7 @@ function scheduleClicks(context, destination, t0) {
   const stage1S = C.STAGE1_MS / 1000;
   const osc = context.createOscillator();
   const gain = context.createGain();
+  const panner = typeof context.createStereoPanner === 'function' ? context.createStereoPanner() : null;
   osc.type = 'sine';
   osc.frequency.value = C.CLICK_HZ;
   gain.gain.setValueAtTime(0, t0);
@@ -405,8 +407,18 @@ function scheduleClicks(context, destination, t0) {
     gain.gain.linearRampToValueAtTime(C.CLICK_GAIN, at + C.CLICK_EDGE_S);
     gain.gain.setValueAtTime(C.CLICK_GAIN, at + onS - C.CLICK_EDGE_S);
     gain.gain.linearRampToValueAtTime(0, at + onS);
+    if (panner) {
+      panner.pan.setValueAtTime(nextClickPan, at);
+      nextClickPan = -nextClickPan;
+    }
   }
-  osc.connect(gain).connect(destination);
+  osc.connect(gain);
+  if (panner) {
+    gain.connect(panner);
+    panner.connect(destination);
+  } else {
+    gain.connect(destination);
+  }
   osc.start(t0);
   osc.stop(t0 + stage1S);
 }
@@ -421,10 +433,8 @@ function scheduleHum(context, destination, t0) {
   const lfo = context.createOscillator();
   const lfoDepth = context.createGain();
   hum.type = 'triangle';
-  hum.frequency.setValueAtTime(C.HUM_MIN_HZ, t1);
-  hum.frequency.linearRampToValueAtTime(C.HUM_MAX_HZ, tEnd);
-  humGain.gain.setValueAtTime(0.0001, t1);
-  humGain.gain.linearRampToValueAtTime(C.HUM_START_GAIN, t1 + C.HUM_FADE_IN_S);
+  hum.frequency.setValueAtTime(C.HUM_HZ, t1);
+  humGain.gain.setValueAtTime(C.HUM_MICRO_GAIN, t1);
   humGain.gain.linearRampToValueAtTime(C.HUM_END_GAIN, tEnd);
   pulse.gain.value = C.PULSE_BASE;
   lfo.type = 'sine';
@@ -570,7 +580,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     if (!ep.isStage2) {
       ep.isStage2 = true;
       setStatus('Хропіння триває — Рефлекс 2');
-      onLog('Хропіння понад 3 с — Рефлекс 2: наростаючий гул 150–250 Гц і пульсуюча вібрація');
+      onLog('Хропіння понад 3 с — Рефлекс 2: наростаючий гул 350 Гц і пульсуюча вібрація');
     }
     pulseVibration(ep, now);
   }
@@ -1127,7 +1137,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     const button = $('test-snore-btn');
     button.disabled = true;
     if (state.engine) state.engine.forceSnore(ENGINE_CONFIG.FORCED_SNORE_MS);
-    $('sim-status').textContent = 'Симуляція 10 с: Рефлекс 1 (кліки 4 кГц) → Рефлекс 2 (гул 150–250 Гц і пульсуюча вібрація)…';
+    $('sim-status').textContent = `Симуляція ${ENGINE_CONFIG.ATTACK_RAMP_S} с: Рефлекс 1 (кліки 4 кГц, ліве/праве вухо) → Рефлекс 2 (гул 350 Гц і пульсуюча вібрація)…`;
     let text;
     try {
       const { isVibrated } = await simulateSnoreAttack();
