@@ -6,6 +6,7 @@
   "scripts": {
     "build:css": "tailwindcss -i src/tailwind.input.css -o tailwind.css --minify",
     "build:web": "npm run build:css && node scripts/copy-web.mjs",
+    "vendor:mediapipe": "node scripts/vendor-mediapipe.mjs",
     "native:apply": "node scripts/apply-native.mjs",
     "cap:sync": "npm run build:web && npx cap sync android && npm run native:apply"
   },
@@ -14,7 +15,8 @@
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
-    "@capacitor/core": "^8.5.3"
+    "@capacitor/core": "^8.5.3",
+    "@mediapipe/tasks-vision": "^1.1.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.3",

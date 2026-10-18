@@ -102,7 +102,7 @@
 
       <div id="cam-card" class="surface scroll-mt-24 rounded-3xl border border-zinc-800 bg-ink-900 p-4">
         <div class="flex items-center justify-between px-2 pb-3">
-          <p class="accent text-xs uppercase tracking-widest text-gold-400">Face-Tracking · симуляція</p>
+          <p class="accent text-xs uppercase tracking-widest text-gold-400">Face-Tracking</p>
           <button id="cam-toggle" type="button"
                   class="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 active:bg-zinc-900">
             Увімкнути камеру
@@ -1261,18 +1261,27 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     { id: 'palate', name: 'Підйом піднебіння', hint: 'Широко відкрийте рот і плавно промовляйте «а».' }
   ];
 
-  const TRACK_INTERVAL_MS = 2000;
-  const JAW_POINTS = 9;
-  const AXIS_Y = [0.3, 0.45, 0.6];
-  const MARK_JITTER = 0.012;
+  const TRACK_INTERVAL_MS = 500;
   const MARK_RADIUS_PX = 4;
   const TILT_NORM_MIN_DEG = 4;
   const TILT_NORM_MAX_DEG = 6;
   const TILT_SIM_OFF_MIN_DEG = 1;
   const TILT_SIM_OFF_MAX_DEG = 9;
   const AMPLITUDE_NORM_MIN = 95;
-  const AMPLITUDE_SIM_OFF_MIN = 80;
   const AMPLITUDE_MAX = 100;
+  // Амплітуда = розкриття внутрішніх країв губ / відстань між зовнішніми кутами очей; це відношення при широко відкритому роті = 100%
+  const MOUTH_FULL_OPEN_RATIO = 0.45;
+  const LANDMARK_UPPER_LIP = 13;
+  const LANDMARK_LOWER_LIP = 14;
+  const LANDMARK_MOUTH_LEFT = 61;
+  const LANDMARK_MOUTH_RIGHT = 291;
+  const LANDMARK_EYE_LEFT_OUTER = 33;
+  const LANDMARK_EYE_RIGHT_OUTER = 263;
+  const JAW_LANDMARKS = [LANDMARK_MOUTH_LEFT, LANDMARK_UPPER_LIP, LANDMARK_MOUTH_RIGHT, LANDMARK_LOWER_LIP];
+  const AXIS_LANDMARKS = [LANDMARK_EYE_LEFT_OUTER, LANDMARK_EYE_RIGHT_OUTER];
+  const MEDIAPIPE_BUNDLE_URL = './vendor/mediapipe/vision_bundle.esm.js';
+  const MEDIAPIPE_WASM_DIR = './vendor/mediapipe/wasm';
+  const FACE_MODEL_URL = './vendor/mediapipe/face_landmarker.task';
   const SIM_DEVIATION_CHANCE = 0.03;
   const GRID_DIVISIONS = 4;
   const MARK_COLOR = '#34d399';
@@ -1285,7 +1294,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   let tone = 0;
   let running = null;
   let runCounter = 0;
-  const cam = { stream: null, attempt: 0, trackId: null, marks: [], verdict: null };
+  const cam = { stream: null, attempt: 0, trackId: null, marks: [], verdict: null, landmarker: null };
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -1484,17 +1493,20 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   /* ---------- Face-Tracking (симуляція) ---------- */
 
-  function jitter() {
-    return (Math.random() - 0.5) * 2 * MARK_JITTER;
+  function buildMarks(landmarks) {
+    const pick = (indexes, kind) => indexes.map((i) => ({ x: landmarks[i].x, y: landmarks[i].y, kind }));
+    return [...pick(JAW_LANDMARKS, 'jaw'), ...pick(AXIS_LANDMARKS, 'axis')];
   }
 
-  function buildMarks() {
-    const jaw = Array.from({ length: JAW_POINTS }, (_, i) => {
-      const t = i / (JAW_POINTS - 1);
-      return { x: 0.5 + 0.28 * Math.cos(Math.PI * (1 - t)), y: 0.45 + 0.37 * Math.sin(Math.PI * t) };
-    });
-    const axis = AXIS_Y.map((y) => ({ x: 0.5, y }));
-    return [...jaw, ...axis].map((p) => ({ x: p.x + jitter(), y: p.y + jitter() }));
+  // Координати міток нормалізовані до кадру відео; перераховуємо їх з урахуванням object-cover і дзеркального відео
+  function toCanvasPoint(p, width, height) {
+    const video = $('cam-video');
+    const videoWidth = video.videoWidth || width;
+    const videoHeight = video.videoHeight || height;
+    const scale = Math.max(width / videoWidth, height / videoHeight);
+    const offsetX = (width - videoWidth * scale) / 2;
+    const offsetY = (height - videoHeight * scale) / 2;
+    return { x: width - (offsetX + p.x * videoWidth * scale), y: offsetY + p.y * videoHeight * scale };
   }
 
   function drawGrid(ctx, width, height) {
@@ -1515,24 +1527,25 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return isOk ? MARK_OK_COLOR : MARK_BAD_COLOR;
   }
 
-  // Точки щелепи показують амплітуду, точки осі обличчя — кут нахилу
+  // Контур губ показує амплітуду (колір вердикту); кути очей — базова лінія масштабу обличчя
   function drawMarks(ctx, width, height) {
     const radius = MARK_RADIUS_PX * (window.devicePixelRatio || 1);
     const jawColor = verdictColor(cam.verdict ? cam.verdict.isAmplitudeOk : null);
-    const axisColor = verdictColor(cam.verdict ? cam.verdict.isTiltOk : null);
+    const points = cam.marks.map((mark) => ({ ...toCanvasPoint(mark, width, height), kind: mark.kind }));
     ctx.strokeStyle = jawColor;
     ctx.globalAlpha = 0.5;
     ctx.beginPath();
-    cam.marks.slice(0, JAW_POINTS).forEach((p, i) => {
-      if (i === 0) ctx.moveTo(p.x * width, p.y * height);
-      else ctx.lineTo(p.x * width, p.y * height);
+    points.filter((p) => p.kind === 'jaw').forEach((p, i) => {
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
     });
+    ctx.closePath();
     ctx.stroke();
     ctx.globalAlpha = 1;
-    cam.marks.forEach((p, i) => {
-      ctx.fillStyle = i < JAW_POINTS ? jawColor : axisColor;
+    points.forEach((p) => {
+      ctx.fillStyle = p.kind === 'jaw' ? jawColor : MARK_COLOR;
       ctx.beginPath();
-      ctx.arc(p.x * width, p.y * height, radius, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fill();
     });
   }
@@ -1562,20 +1575,42 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     return min + Math.random() * (max - min);
   }
 
-  // Єдина точка, яку треба замінити справжнім аналізом обличчя; зараз значення симулюються
-  // в межах норми, зі спорадичними виходами за неї, щоб було видно червоний стан
+  function landmarkDistance(a, b, width, height) {
+    return Math.hypot((a.x - b.x) * width, (a.y - b.y) * height);
+  }
+
+  // Відкриття рота у відсотках: відстань між губами відносно відстані між очима (не залежить від віддалі до камери)
+  function measureAmplitude(landmarks, width, height) {
+    const eyeDistance = landmarkDistance(landmarks[LANDMARK_EYE_LEFT_OUTER], landmarks[LANDMARK_EYE_RIGHT_OUTER], width, height);
+    if (eyeDistance === 0) return null;
+    const lipGap = landmarkDistance(landmarks[LANDMARK_UPPER_LIP], landmarks[LANDMARK_LOWER_LIP], width, height);
+    return Math.round(Math.min(1, lipGap / eyeDistance / MOUTH_FULL_OPEN_RATIO) * AMPLITUDE_MAX);
+  }
+
+  function detectFaceLandmarks() {
+    const video = $('cam-video');
+    const isVideoReady = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0;
+    if (!cam.landmarker || !isVideoReady) return null;
+    const result = cam.landmarker.detectForVideo(video, performance.now());
+    return result.faceLandmarks.length > 0 ? result.faceLandmarks[0] : null;
+  }
+
+  // Амплітуда рахується з реальних міток обличчя. Кут нахилу поки симулюється в межах норми,
+  // зі спорадичними виходами за неї, щоб було видно червоний стан
   function readFaceMetrics() {
+    const landmarks = detectFaceLandmarks();
+    const video = $('cam-video');
+    const amplitude = landmarks ? measureAmplitude(landmarks, video.videoWidth, video.videoHeight) : null;
+    if (amplitude === null) {
+      return { landmarks: null, tilt: null, amplitude: null, isTiltOk: null, isAmplitudeOk: false, isNormal: false };
+    }
     const isTiltOff = Math.random() < SIM_DEVIATION_CHANCE;
-    const isAmplitudeOff = Math.random() < SIM_DEVIATION_CHANCE;
     const tilt = isTiltOff
       ? randomBetween(TILT_SIM_OFF_MIN_DEG, TILT_SIM_OFF_MAX_DEG)
       : randomBetween(TILT_NORM_MIN_DEG, TILT_NORM_MAX_DEG);
-    const amplitude = Math.round(isAmplitudeOff
-      ? randomBetween(AMPLITUDE_SIM_OFF_MIN, AMPLITUDE_NORM_MIN - 1)
-      : randomBetween(AMPLITUDE_NORM_MIN, AMPLITUDE_MAX));
     const isTiltOk = tilt >= TILT_NORM_MIN_DEG && tilt <= TILT_NORM_MAX_DEG;
     const isAmplitudeOk = amplitude >= AMPLITUDE_NORM_MIN;
-    return { tilt, amplitude, isTiltOk, isAmplitudeOk, isNormal: isTiltOk && isAmplitudeOk };
+    return { landmarks, tilt, amplitude, isTiltOk, isAmplitudeOk, isNormal: isTiltOk && isAmplitudeOk };
   }
 
   function renderMetricLine(id, text, isOk) {
@@ -1586,12 +1621,17 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   function analyzeJaw() {
     const metrics = readFaceMetrics();
-    cam.marks = buildMarks();
+    cam.marks = metrics.landmarks ? buildMarks(metrics.landmarks) : [];
     cam.verdict = { isTiltOk: metrics.isTiltOk, isAmplitudeOk: metrics.isAmplitudeOk };
-    renderMetricLine('cam-angle', `Кут нахилу: ${metrics.tilt.toFixed(1)}° — ${metrics.isTiltOk
-      ? 'Норма (4°-6°)' : 'Нахиліть голову до 5°!'}`, metrics.isTiltOk);
-    renderMetricLine('cam-amp', `Амплітуда: ${metrics.amplitude}% — ${metrics.isAmplitudeOk
-      ? 'Чудово, тримайте!' : 'Відкрийте рот ширше (мінімум 95%)!'}`, metrics.isAmplitudeOk);
+    if (metrics.amplitude === null) {
+      renderMetricLine('cam-angle', 'Кут нахилу: —', null);
+      renderMetricLine('cam-amp', 'Амплітуда: обличчя не знайдено — наведіть камеру на обличчя', false);
+    } else {
+      renderMetricLine('cam-angle', `Кут нахилу: ${metrics.tilt.toFixed(1)}° — ${metrics.isTiltOk
+        ? 'Норма (4°-6°)' : 'Нахиліть голову до 5°!'}`, metrics.isTiltOk);
+      renderMetricLine('cam-amp', `Амплітуда: ${metrics.amplitude}% — ${metrics.isAmplitudeOk
+        ? 'Чудово, тримайте!' : 'Відкрийте рот ширше (мінімум 95%)!'}`, metrics.isAmplitudeOk);
+    }
     drawOverlay();
     if (!isCounting()) return;
     running = { ...running, samples: running.samples + 1, isNormal: running.isNormal && metrics.isNormal };
@@ -1624,6 +1664,19 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     drawOverlay();
   }
 
+  // Модель і WASM лежать у vendor/ і працюють локально: відео нікуди не надсилається
+  async function loadFaceLandmarker() {
+    if (cam.landmarker) return cam.landmarker;
+    const vision = await import(MEDIAPIPE_BUNDLE_URL);
+    const fileset = await vision.FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_DIR);
+    cam.landmarker = await vision.FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: FACE_MODEL_URL },
+      runningMode: 'VIDEO',
+      numFaces: 1
+    });
+    return cam.landmarker;
+  }
+
   // Повертає true, якщо камера працює (вже була увімкнена або щойно запущена)
   async function startCamera() {
     if (cam.stream) return true;
@@ -1648,6 +1701,18 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     stream.getVideoTracks().forEach((track) => track.addEventListener('ended', stopActivities));
     $('cam-video').srcObject = stream;
     $('cam-video').play().catch((err) => console.error('VIO: відео не стартувало автоматично', err));
+    $('cam-note').textContent = 'Завантаження моделі обличчя…';
+    try {
+      await loadFaceLandmarker();
+    } catch (err) {
+      console.error('VIO: не вдалося завантажити модель Face Landmarker', err);
+      if (attempt === cam.attempt) {
+        stopCamera();
+        $('cam-note').textContent = 'Не вдалося завантажити модель розпізнавання обличчя. Перевірте з\'єднання й спробуйте ще раз.';
+      }
+      return false;
+    }
+    if (attempt !== cam.attempt) return false;
     $('cam-note').textContent = 'Відео обробляється лише на пристрої, нікуди не надсилається.';
     setCameraUi(true);
     syncCanvasSize();
