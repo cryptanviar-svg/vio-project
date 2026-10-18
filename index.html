@@ -11,20 +11,7 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            ink: { 950: '#07070a', 900: '#0d0d12', 800: '#14141b', 700: '#1d1d27' },
-            gold: { 400: '#e6c581', 500: '#d4a94f' }
-          },
-          fontFamily: { sans: ['Inter', 'system-ui', 'Segoe UI', 'sans-serif'] }
-        }
-      }
-    };
-  </script>
+  <link rel="stylesheet" href="tailwind.css">
   <style>
     html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     /* 100dvh враховує рухомий адресний рядок мобільного Safari/Chrome */
@@ -640,6 +627,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const EVENTS_KEY = 'vio.events';
   const MAX_STORED_EVENTS = 200;
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
+  // У нативній оболонці Capacitor тип аудіовиходу й фоновий сервіс дає Android; у браузері цих плагінів немає
+  const isNative = Boolean(window.Capacitor && window.Capacitor.isNativePlatform());
+  const NativeAudioRoute = isNative ? window.Capacitor.registerPlugin('AudioRoute') : null;
+  const NativeSession = isNative ? window.Capacitor.registerPlugin('VioSession') : null;
 
   const OUTPUT = {
     bluetooth: { text: '🎧 Bluetooth-гарнітура', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
@@ -749,6 +740,15 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   /* ---------- Fail-Safe: аудіовихід ---------- */
 
   async function detectOutput() {
+    if (NativeAudioRoute) {
+      try {
+        const route = await NativeAudioRoute.getRoute();
+        return route.kind === 'bluetooth' ? 'bluetooth' : 'speaker';
+      } catch (err) {
+        console.error('VIO: помилка нативного визначення аудіовиходу', err);
+        return 'unknown';
+      }
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return 'unknown';
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -938,6 +938,22 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     releaseSentinel(sentinel);
   }
 
+  // Foreground-сервіс тримає мікрофон живим при вимкненому екрані; збій не зупиняє сесію, але фіксується
+  async function startBackgroundService() {
+    if (!NativeSession) return;
+    try {
+      await NativeSession.start();
+    } catch (err) {
+      console.error('VIO: не вдалося запустити фоновий сервіс', err);
+      logEvent('Фоновий сервіс не запущено — робота з вимкненим екраном не гарантується');
+    }
+  }
+
+  function stopBackgroundService() {
+    if (!NativeSession) return;
+    NativeSession.stop().catch((err) => console.error('VIO: не вдалося зупинити фоновий сервіс', err));
+  }
+
   async function startSession(mode) {
     if (state.session || state.isStarting) return;
     showAlert('');
@@ -968,6 +984,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (mode === 'night') {
       armMask();
       acquireWakeLock();
+      startBackgroundService();
     }
   }
 
@@ -982,6 +999,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       state.engine = null;
     }
     releaseWakeLock();
+    stopBackgroundService();
     const seconds = Math.round((Date.now() - s.start) / 1000);
     saveSessions([...loadSessions(), {
       mode: s.mode, start: s.start, seconds, endedBy, events: s.events, fallbacks: s.fallbacks
@@ -1178,6 +1196,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener('devicechange', refreshOutput);
     }
+    if (NativeAudioRoute) NativeAudioRoute.addListener('routeChanged', () => refreshOutput());
 
     setTab('night');
     renderSession();
@@ -1186,7 +1205,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   }
 
   function registerServiceWorker() {
-    if (!('serviceWorker' in navigator)) return;
+    if (isNative || !('serviceWorker' in navigator)) return;
     navigator.serviceWorker.register('sw.js').catch((err) => {
       console.error('VIO: service worker не зареєстровано', err);
     });

@@ -1,7 +1,7 @@
 'use strict';
 
-const CACHE_VERSION = 'vio-v1.7';
-const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
+const CACHE_VERSION = 'vio-v1.8';
+const APP_SHELL = ['./', './index.html', './tailwind.css', './manifest.json', './icon.svg'];
 const TAILWIND_HOST = 'cdn.tailwindcss.com';
 
 self.addEventListener('install', (event) => {
