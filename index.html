@@ -255,6 +255,7 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.5,
+  SLOW_CALL_MS: 5,
   AI_GAP_BRIDGE_MS: 1200,
   AI_STALE_MS: 2500
 });
@@ -333,13 +334,17 @@ async function ensureCaptureWorklet(context) {
 
 // Оцінки класів для вікна звуку; вихід «scores» шукаємо за формою [кадри, 521], бо порядок виходів моделі інший
 async function scoreWindow(model, samples) {
+  const startedAt = performance.now();
   const input = tf.tensor1d(samples);
+  const tensorAt = performance.now();
   const outputs = model.predict(input);
+  const predictAt = performance.now();
   const tensors = Array.isArray(outputs) ? outputs : [outputs];
   try {
     const scores = tensors.find((t) => t.shape[t.shape.length - 1] === ENGINE_CONFIG.AI_CLASS_COUNT);
     if (!scores) throw new Error('YAMNet не повернув оцінок класів');
     const rows = await scores.array();
+    console.error(`[VIO ЧАС] tensor1d: ${(tensorAt - startedAt).toFixed(1)} мс | predict (синхронно): ${(predictAt - tensorAt).toFixed(1)} мс | array() (очікування GPU): ${(performance.now() - predictAt).toFixed(1)} мс`);
     return rows[rows.length - 1];
   } finally {
     tf.dispose([input, ...tensors]);
@@ -602,6 +607,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     if (!ctx || !st) return;
     const ai = st.ai;
     const ratio = ctx.sampleRate / C.AI_SAMPLE_RATE;
+    const startedAt = performance.now();
     for (let i = 0; i < chunk.length; i++) {
       ai.accumulator += chunk[i];
       ai.accumulated += 1;
@@ -614,6 +620,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       ai.accumulated = 0;
       ai.position -= ratio;
     }
+    const elapsed = performance.now() - startedAt;
+    if (elapsed > C.SLOW_CALL_MS) console.error(`[VIO ЧАС] pushSamples повільний: ${elapsed.toFixed(1)} мс`);
   }
 
   function latestWindow() {
@@ -636,7 +644,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     ai.isBusy = true;
     try {
       console.error(`[VIO АКТУАЛЬНО] Бекенд TF: ${tf.getBackend()} | Стан контексту: ${ctx ? ctx.state : 'зупинено'}`);
-      const scores = await scoreWindow(YamnetStore.model, latestWindow());
+      const windowStartedAt = performance.now();
+      const samples = latestWindow();
+      console.error(`[VIO ЧАС] latestWindow: ${(performance.now() - windowStartedAt).toFixed(1)} мс`);
+      const scores = await scoreWindow(YamnetStore.model, samples);
       console.error('[VIO АКТУАЛЬНО] Сирі дані отримано!');
       const snoring = scores[C.AI_SNORING_CLASS];
       console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
@@ -724,7 +735,14 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     setStatus('Слухаю');
   }
 
+  // Обгортка вимірює тривалість кадру аналізу, щоб знайти джерело [Violation] у консолі
   function analyze() {
+    const startedAt = performance.now();
+    analyzeFrame();
+    console.error(`[VIO ЧАС] analyze: ${(performance.now() - startedAt).toFixed(1)} мс`);
+  }
+
+  function analyzeFrame() {
     const now = performance.now();
     analyser.getFloatTimeDomainData(buffer);
     let sum = 0;
