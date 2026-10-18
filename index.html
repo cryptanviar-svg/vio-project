@@ -316,7 +316,7 @@ function loadYamnet() {
       await tf.ready();
       const model = await tf.loadGraphModel(ENGINE_CONFIG.YAMNET_URL);
       const warmInput = tf.zeros([ENGINE_CONFIG.AI_WINDOW_SAMPLES]);
-      tf.dispose([warmInput, await model.executeAsync(warmInput)]);
+      tf.dispose([warmInput, model.predict(warmInput)]);
       YamnetStore.model = model;
       return model;
     })().finally(() => { YamnetStore.loading = null; });
@@ -340,14 +340,14 @@ async function scoreWindow(model, samples) {
   const startedAt = performance.now();
   const input = tf.tensor1d(samples);
   const tensorAt = performance.now();
-  const outputs = await model.executeAsync(input);
+  const outputs = model.predict(input);
   const predictAt = performance.now();
   const tensors = Array.isArray(outputs) ? outputs : [outputs];
   try {
     const scores = tensors.find((t) => t.shape[t.shape.length - 1] === ENGINE_CONFIG.AI_CLASS_COUNT);
     if (!scores) throw new Error('YAMNet не повернув оцінок класів');
     const rows = await scores.array();
-    console.error(`[VIO ЧАС] tensor1d: ${(tensorAt - startedAt).toFixed(1)} мс | executeAsync: ${(predictAt - tensorAt).toFixed(1)} мс | array() (очікування GPU): ${(performance.now() - predictAt).toFixed(1)} мс`);
+    console.error(`[VIO ЧАС] tensor1d: ${(tensorAt - startedAt).toFixed(1)} мс | predict (синхронно): ${(predictAt - tensorAt).toFixed(1)} мс | array() (очікування GPU): ${(performance.now() - predictAt).toFixed(1)} мс`);
     return rows[rows.length - 1];
   } finally {
     tf.dispose([input, ...tensors]);
