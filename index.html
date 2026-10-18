@@ -254,8 +254,10 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORING_CLASS: 38,
   AI_COUGH_CLASS: 42,
   AI_SNORE_MIN_SCORE: 0.52,
-  // Три кадри поспіль з RMS = 0 означають мертвий аудіопотік: його перезапускають; інженерний тест примусово дає хропіння на FORCED_SNORE_MS
-  MIC_SILENT_FRAMES: 3,
+  // RMS = 0 безперервно MIC_SILENT_MS означає мертвий аудіопотік: його перезапускають; кадр, що запізнився понад FRAME_STALL_MS, скидає відлік.
+  // Інженерний тест примусово дає хропіння на FORCED_SNORE_MS
+  MIC_SILENT_MS: 5000,
+  FRAME_STALL_MS: 2500,
   FORCED_SNORE_MS: 3000,
   AI_GAP_BRIDGE_MS: 1200,
   AI_STALE_MS: 2500
@@ -624,7 +626,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
 
   function latestWindow() {
     const window = new Float32Array(aiBuffer.length);
-    for (let i = 0; i < window.length; i++) window[i] = aiBuffer[(st.ai.writeIndex + i) % aiBuffer.length];
+    const oldest = st.ai.writeIndex;
+    window.set(aiBuffer.subarray(oldest), 0);
+    window.set(aiBuffer.subarray(0, oldest), aiBuffer.length - oldest);
     return window;
   }
 
@@ -730,10 +734,18 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     setStatus('Слухаю');
   }
 
-  // RMS = 0 кілька кадрів поспіль: аудіопотік мертвий (типово зависла Bluetooth-гарнітура); просимо перезапустити двигун
+  // RMS = 0 безперервно MIC_SILENT_MS: аудіопотік мертвий (типово зависла Bluetooth-гарнітура); просимо перезапустити двигун.
+  // Якщо сам цикл аналізу запізнився (фриз сторінки), відлік тиші починається спочатку
   function detectSilentStream(rms, now) {
-    st.silentFrames = rms === 0 && now >= st.ai.forcedUntil ? st.silentFrames + 1 : 0;
-    if (st.silentFrames < C.MIC_SILENT_FRAMES || st.isSilenceReported) return;
+    const isStalled = st.lastFrameAt !== null && now - st.lastFrameAt > C.FRAME_STALL_MS;
+    st.lastFrameAt = now;
+    const isSilent = rms === 0 && now >= st.ai.forcedUntil;
+    if (!isSilent) {
+      st.silentSince = null;
+      return;
+    }
+    if (st.silentSince === null || isStalled) st.silentSince = now;
+    if (now - st.silentSince < C.MIC_SILENT_MS || st.isSilenceReported) return;
     st.isSilenceReported = true;
     setStatus('Мікрофон мовчить (RMS = 0): перезапускаю аудіопотік…');
     onSilent();
@@ -836,7 +848,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
         isReady: false, isBusy: false, isSnore: false, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
-      silentFrames: 0, isSilenceReported: false,
+      silentSince: null, lastFrameAt: null, isSilenceReported: false,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
