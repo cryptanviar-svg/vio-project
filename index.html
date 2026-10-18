@@ -194,8 +194,8 @@
 <script>
 /* Акустичний двигун VIO: Web Audio (low-latency), детекція хропіння, драбина біофідбеку */
 const ENGINE_CONFIG = Object.freeze({
-  HIGHPASS_HZ: 60,
-  LOWPASS_HZ: 300,
+  HIGHPASS_HZ: 100,
+  LOWPASS_HZ: 500,
   FILTER_Q: Math.SQRT1_2,
   FFT_SIZE: 1024,
   ANALYSIS_INTERVAL_MS: 40,
@@ -208,7 +208,7 @@ const ENGINE_CONFIG = Object.freeze({
   RELEASE_RATIO: 2,
   GAP_BRIDGE_MS: 150,
   MIN_BURST_MS: 300,
-  CONFIRM_MIN_MS: 800,
+  CONFIRM_MIN_MS: 2000,
   CONFIRM_MAX_MS: 2500,
   SAW_PEAK_RATIO: 0.5,
   EPISODE_GAP_MS: 4500,
