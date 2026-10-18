@@ -12,6 +12,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <link rel="stylesheet" href="tailwind.css">
+  <!-- Лише в нативній оболонці Capacitor: нативний міст дає window.Capacitor без registerPlugin, його додає runtime capacitor.js -->
+  <script>if (window.Capacitor) document.write('<script src="capacitor.js"><\/script>');</script>
   <style>
     html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     /* 100dvh враховує рухомий адресний рядок мобільного Safari/Chrome */
@@ -628,7 +630,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const MAX_STORED_EVENTS = 200;
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
   // У нативній оболонці Capacitor тип аудіовиходу й фоновий сервіс дає Android; у браузері цих плагінів немає
-  const isNative = Boolean(window.Capacitor && window.Capacitor.isNativePlatform());
+  const isNative = Boolean(window.Capacitor && typeof window.Capacitor.registerPlugin === 'function'
+    && window.Capacitor.isNativePlatform());
   const NativeAudioRoute = isNative ? window.Capacitor.registerPlugin('AudioRoute') : null;
   const NativeSession = isNative ? window.Capacitor.registerPlugin('VioSession') : null;
 
