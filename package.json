@@ -7,6 +7,7 @@
     "build:css": "tailwindcss -i src/tailwind.input.css -o tailwind.css --minify",
     "build:web": "npm run build:css && node scripts/copy-web.mjs",
     "vendor:mediapipe": "node scripts/vendor-mediapipe.mjs",
+    "vendor:yamnet": "node scripts/vendor-yamnet.mjs",
     "native:apply": "node scripts/apply-native.mjs",
     "cap:sync": "npm run build:web && npx cap sync android && npm run native:apply"
   },

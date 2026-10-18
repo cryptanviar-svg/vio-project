@@ -239,8 +239,102 @@ const ENGINE_CONFIG = Object.freeze({
   PULSE_BASE: 0.7,
   RELEASE_S: 0.15,
   VIB_ON_MS: 125,
-  VIB_OFF_MS: 125
+  VIB_OFF_MS: 125,
+  // YAMNet (Google AudioSet, 521 клас): вхід — 16 кГц моно, мінімум 15600 семплів (0.975 с); індекси з yamnet_class_map.csv
+  TFJS_URL: './vendor/tfjs/tf.min.js',
+  YAMNET_URL: './vendor/yamnet/model.json',
+  AI_SAMPLE_RATE: 16000,
+  AI_WINDOW_SAMPLES: 15600,
+  AI_HOP_MS: 480,
+  AI_CAPTURE_BATCH: 2048,
+  AI_CLASS_COUNT: 521,
+  AI_SPEECH_CLASS: 0,
+  AI_LAUGHTER_CLASS: 13,
+  AI_SNORING_CLASS: 38,
+  AI_COUGH_CLASS: 42,
+  AI_SNORE_MIN_SCORE: 0.7,
+  AI_GAP_BRIDGE_MS: 600,
+  AI_STALE_MS: 1500
 });
+
+/* Нейромережа YAMNet: модель, TensorFlow.js і воркліт захоплення лежать у vendor/ і працюють локально */
+const CAPTURE_WORKLET_NAME = 'vio-capture';
+const CAPTURE_WORKLET_CODE = `
+class VioCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.batch = new Float32Array(${ENGINE_CONFIG.AI_CAPTURE_BATCH});
+    this.length = 0;
+  }
+  process(inputs) {
+    const channel = inputs[0][0];
+    if (!channel) return true;
+    for (let i = 0; i < channel.length; i++) {
+      this.batch[this.length++] = channel[i];
+      if (this.length === this.batch.length) {
+        this.port.postMessage(this.batch.slice());
+        this.length = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('${CAPTURE_WORKLET_NAME}', VioCapture);
+`;
+const YamnetStore = { model: null, loading: null, workletContexts: new WeakSet() };
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = src;
+    tag.onload = resolve;
+    tag.onerror = () => reject(new Error(`не вдалося завантажити ${src}`));
+    document.head.appendChild(tag);
+  });
+}
+
+// Модель вантажиться один раз на все життя сторінки; перший прогін на нулях компілює шейдери, щоб не гальмувати вночі
+function loadYamnet() {
+  if (YamnetStore.model) return Promise.resolve(YamnetStore.model);
+  if (!YamnetStore.loading) {
+    YamnetStore.loading = (async () => {
+      if (typeof tf === 'undefined') await loadScriptOnce(ENGINE_CONFIG.TFJS_URL);
+      await tf.ready();
+      const model = await tf.loadGraphModel(ENGINE_CONFIG.YAMNET_URL);
+      const warmInput = tf.zeros([ENGINE_CONFIG.AI_WINDOW_SAMPLES]);
+      tf.dispose([warmInput, model.predict(warmInput)]);
+      YamnetStore.model = model;
+      return model;
+    })().finally(() => { YamnetStore.loading = null; });
+  }
+  return YamnetStore.loading;
+}
+
+async function ensureCaptureWorklet(context) {
+  if (YamnetStore.workletContexts.has(context)) return;
+  const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET_CODE], { type: 'text/javascript' }));
+  try {
+    await context.audioWorklet.addModule(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  YamnetStore.workletContexts.add(context);
+}
+
+// Оцінки класів для вікна звуку; вихід «scores» шукаємо за формою [кадри, 521], бо порядок виходів моделі інший
+async function scoreWindow(model, samples) {
+  const input = tf.tensor1d(samples);
+  const outputs = model.predict(input);
+  const tensors = Array.isArray(outputs) ? outputs : [outputs];
+  try {
+    const scores = tensors.find((t) => t.shape[t.shape.length - 1] === ENGINE_CONFIG.AI_CLASS_COUNT);
+    if (!scores) throw new Error('YAMNet не повернув оцінок класів');
+    const rows = await scores.array();
+    return rows[rows.length - 1];
+  } finally {
+    tf.dispose([input, ...tensors]);
+  }
+}
 
 /* Спільний AudioContext: мобільний WebKit блокує звук до жесту користувача, тож розблокування централізоване */
 const UNLOCK_TARGETS = '.tab-btn, [id$="-toggle"], #test-snore-btn, #exercise-list button';
@@ -393,6 +487,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   let master = null;
   let buffer = null;
   let spectrumBuffer = null;
+  let aiBuffer = null;
+  let aiTimerId = null;
+  let captureNode = null;
   let timerId = null;
   let st = null;
   let isMuted = false;
@@ -488,6 +585,83 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     return (low / C.LOW_BINS) / (total / spectrumBuffer.length);
   }
 
+  /* ---------- Хропіння: нейромережа YAMNet ---------- */
+
+  // Знижує частоту дискретизації до 16 кГц усередненням і складає семпли в кільцевий буфер
+  function pushSamples(chunk) {
+    if (!ctx || !st) return;
+    const ai = st.ai;
+    const ratio = ctx.sampleRate / C.AI_SAMPLE_RATE;
+    for (let i = 0; i < chunk.length; i++) {
+      ai.accumulator += chunk[i];
+      ai.accumulated += 1;
+      ai.position += 1;
+      if (ai.position < ratio) continue;
+      aiBuffer[ai.writeIndex] = ai.accumulator / ai.accumulated;
+      ai.writeIndex = (ai.writeIndex + 1) % aiBuffer.length;
+      ai.filled = Math.min(ai.filled + 1, aiBuffer.length);
+      ai.accumulator = 0;
+      ai.accumulated = 0;
+      ai.position -= ratio;
+    }
+  }
+
+  function latestWindow() {
+    const window = new Float32Array(aiBuffer.length);
+    for (let i = 0; i < window.length; i++) window[i] = aiBuffer[(st.ai.writeIndex + i) % aiBuffer.length];
+    return window;
+  }
+
+  // Реагуємо лише на клас Snoring: він має бути достатньо впевненим і сильнішим за мову, кашель і сміх
+  async function classify() {
+    const session = st;
+    const ai = session.ai;
+    if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
+    const quietLevel = Math.max(C.MIN_TRIGGER_RMS / 2, session.floor * C.RELEASE_RATIO);
+    if (session.env < quietLevel) {
+      ai.isSnore = false;
+      ai.updatedAt = performance.now();
+      return;
+    }
+    ai.isBusy = true;
+    try {
+      const scores = await scoreWindow(YamnetStore.model, latestWindow());
+      const snoring = scores[C.AI_SNORING_CLASS];
+      const others = Math.max(scores[C.AI_SPEECH_CLASS], scores[C.AI_COUGH_CLASS], scores[C.AI_LAUGHTER_CLASS]);
+      ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
+      ai.updatedAt = performance.now();
+    } catch (err) {
+      console.error('VIO: помилка класифікації YAMNet', err);
+      ai.isReady = false;
+      onLog('YAMNet дав збій — працює низькочастотний аналіз спектра');
+    } finally {
+      ai.isBusy = false;
+    }
+  }
+
+  async function startAi(context, source, session) {
+    try {
+      if (!context.audioWorklet) throw new Error('AudioWorklet недоступний');
+      await Promise.all([loadYamnet(), ensureCaptureWorklet(context)]);
+      if (st !== session) return;
+      aiBuffer = new Float32Array(C.AI_WINDOW_SAMPLES);
+      captureNode = new AudioWorkletNode(context, CAPTURE_WORKLET_NAME);
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      source.connect(captureNode);
+      captureNode.connect(sink);
+      sink.connect(context.destination);
+      chain.push(captureNode, sink);
+      captureNode.port.onmessage = (event) => pushSamples(event.data);
+      aiTimerId = setInterval(classify, C.AI_HOP_MS);
+      session.ai.isReady = true;
+      onLog('YAMNet завантажено: хропіння визначає нейромережа (клас Snoring)');
+    } catch (err) {
+      console.error('VIO: YAMNet недоступний', err);
+      onLog('YAMNet недоступний — працює низькочастотний аналіз спектра');
+    }
+  }
+
   // Сплеск зараховується, лише якщо триває BURST_MIN_MS–BURST_MAX_MS; короткі шуми ігноруються, задовгі скидають лічильник
   function finishBurst(now, durationMs, endedAt) {
     if (durationMs < C.BURST_MIN_MS) return;
@@ -504,8 +678,11 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     const trigger = Math.max(C.MIN_TRIGGER_RMS, st.floor * C.TRIGGER_RATIO);
     const release = Math.max(C.MIN_TRIGGER_RMS / 2, st.floor * C.RELEASE_RATIO);
     const isLockedOut = now < st.lockoutUntil;
-    const isLowFrequency = st.lowRatio >= C.LOW_ENERGY_RATIO;
-    const isAbove = isLowFrequency && (st.seg ? st.env > release : !isLockedOut && st.env > trigger);
+    const ai = st.ai;
+    const isAiFresh = ai.isReady && now - ai.updatedAt < C.AI_STALE_MS;
+    const isSnoreSound = isAiFresh ? ai.isSnore : st.lowRatio >= C.LOW_ENERGY_RATIO;
+    const bridgeMs = ai.isReady ? C.AI_GAP_BRIDGE_MS : C.GAP_BRIDGE_MS;
+    const isAbove = isSnoreSound && (st.seg ? st.env > release : !isLockedOut && st.env > trigger);
     st.isActive = isAbove;
 
     if (isAbove) {
@@ -513,7 +690,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       if (!st.seg) st.seg = { start: now };
     } else if (!st.seg) {
       if (!isLockedOut) st.floor += C.FLOOR_SMOOTHING * (st.env - st.floor);
-    } else if (now - st.lastAbove > C.GAP_BRIDGE_MS) {
+    } else if (now - st.lastAbove > bridgeMs) {
       finishBurst(now, st.lastAbove - st.seg.start, st.lastAbove);
       st.seg = null;
     }
@@ -607,6 +784,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     st = {
       startedAt: performance.now(), floor: 0, env: 0, lowRatio: 0, peakEnv: 0, seg: null, lastAbove: 0,
       isActive: false, bursts: 0, lastBurstEnd: 0, episode: null,
+      ai: {
+        isReady: false, isBusy: false, isSnore: false, updatedAt: 0, filled: 0, writeIndex: 0,
+        accumulator: 0, accumulated: 0, position: 0
+      },
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
@@ -614,11 +795,16 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     context.addEventListener('statechange', stateListener);
     setStatus('Калібрування тиші…');
     timerId = setInterval(analyze, C.ANALYSIS_INTERVAL_MS);
+    startAi(context, source, st);
   }
 
   async function stop() {
     if (!ctx) return;
     clearInterval(timerId);
+    clearInterval(aiTimerId);
+    aiTimerId = null;
+    if (captureNode) captureNode.port.onmessage = null;
+    captureNode = null;
     isMuted = false;
     if (st.episode) st.episode.attack.stop();
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
