@@ -1534,7 +1534,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   const AMPLITUDE_NORM_MIN = 60;
   const AMPLITUDE_MAX = 100;
   // Амплітуда = розкриття внутрішніх країв губ / відстань між зовнішніми кутами очей; це відношення при широко відкритому роті = 100%
-  const MOUTH_FULL_OPEN_RATIO = 0.45;
+  const MOUTH_FULL_OPEN_RATIO = 0.4;
   const LANDMARK_UPPER_LIP = 13;
   const LANDMARK_LOWER_LIP = 14;
   const LANDMARK_MOUTH_LEFT = 61;
@@ -1723,6 +1723,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     $('ex-timer').textContent = formatCountdown(remaining);
     $('cam-countdown').textContent = formatCountdown(remaining);
     $('cam-countdown').classList.toggle('hidden', !isCounting());
+    // Старт, скасування, завершення й зміна вправи проходять через цей рендер: повне очищення canvas прибирає трафарет попередньої вправи
+    drawOverlay();
   }
 
   function cancelExercise() {
