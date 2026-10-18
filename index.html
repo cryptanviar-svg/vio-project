@@ -634,7 +634,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     }
     ai.isBusy = true;
     try {
+      console.error(`[VIO АКТУАЛЬНО] Бекенд TF: ${tf.getBackend()} | Стан контексту: ${ctx ? ctx.state : 'зупинено'}`);
       const scores = await scoreWindow(YamnetStore.model, latestWindow());
+      console.error('[VIO АКТУАЛЬНО] Сирі дані отримано!');
       const snoring = scores[C.AI_SNORING_CLASS];
       console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
       const top = scores.reduce((best, score, index) => (score > best.score ? { index, score } : best), { index: 0, score: -1 });
@@ -643,7 +645,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       ai.isSnore = snoring >= C.AI_SNORE_MIN_SCORE && snoring > others;
       ai.updatedAt = performance.now();
     } catch (err) {
-      console.error('VIO: помилка класифікації YAMNet', err);
+      console.error('[VIO АКТУАЛЬНО] Помилка класифікації YAMNet:', err);
       ai.isReady = false;
       onLog('YAMNet дав збій — працює низькочастотний аналіз спектра');
     } finally {
