@@ -744,7 +744,14 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       console.error('VIO: помилка getUserMedia', err);
       throw new Error(micErrorMessage(err));
     }
-    await VioAudio.unlock();
+    // Жорсткий resume після отримання потоку: без стану 'running' аналізатор віддає нулі
+    try {
+      await context.resume();
+    } catch (err) {
+      console.error('VIO: не вдалося відновити AudioContext', err);
+      micStream.getTracks().forEach((track) => track.stop());
+      throw new Error('Не вдалося запустити аудіоядро. Торкніться кнопки старту ще раз.');
+    }
     if (context.state !== 'running') {
       micStream.getTracks().forEach((track) => track.stop());
       throw new Error('Браузер заблокував звук. Торкніться кнопки старту ще раз.');
