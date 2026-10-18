@@ -95,7 +95,7 @@
              class="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
           <div id="tone-fill" class="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all duration-500" style="width:0%"></div>
         </div>
-        <p id="tone-note" class="mt-3 text-xs text-zinc-300">+1% за 5 с безперервного утримання кута 4°–6° і відкритого рота (від 95%)</p>
+        <p id="tone-note" class="mt-3 text-xs text-zinc-300">+1% за 5 с безперервного утримання кута 3°–8° і відкритого рота (від 60%)</p>
       </div>
 
       <ul id="exercise-list" class="space-y-2"></ul>
@@ -118,7 +118,7 @@
         <div id="cam-status" aria-live="polite" class="mt-3 space-y-2 px-2 text-sm">
           <p>
             <span id="cam-angle" class="font-medium text-white">Кут нахилу: —</span>
-            <span class="text-xs text-zinc-200">(Тримайте голову під кутом 4°–6°)</span>
+            <span class="text-xs text-zinc-200">(Тримайте голову під кутом 3°–8°)</span>
           </p>
           <p>
             <span id="cam-amp" class="font-medium text-white">Амплітуда: —</span>
@@ -1244,7 +1244,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   const TONE_KEY = 'vio.tone';
   const TONE_STEP = 1;
   const TONE_MAX = 100;
-  const TONE_NOTE_DEFAULT = '+1% за 5 с безперервного утримання кута 4°–6° і відкритого рота (від 95%)';
+  const TONE_NOTE_DEFAULT = '+1% за 5 с безперервного утримання кута 3°–8° і відкритого рота (від 60%)';
   const EXERCISE_SECONDS = 30;
   const EXERCISE_MS = EXERCISE_SECONDS * 1000;
   const EXERCISE_TICK_MS = 100;
@@ -1263,12 +1263,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
 
   const TRACK_INTERVAL_MS = 200;
   const MARK_RADIUS_PX = 4;
-  const TILT_NORM_MIN_DEG = 4;
-  const TILT_NORM_MAX_DEG = 6;
+  const TILT_NORM_MIN_DEG = 3;
+  const TILT_NORM_MAX_DEG = 8;
   const HOLD_MS = 5000;
   const HOLD_SECONDS = HOLD_MS / 1000;
   const RAD_TO_DEG = 180 / Math.PI;
-  const AMPLITUDE_NORM_MIN = 95;
+  const AMPLITUDE_NORM_MIN = 60;
   const AMPLITUDE_MAX = 100;
   // Амплітуда = розкриття внутрішніх країв губ / відстань між зовнішніми кутами очей; це відношення при широко відкритому роті = 100%
   const MOUTH_FULL_OPEN_RATIO = 0.45;
@@ -1643,9 +1643,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       renderMetricLine('cam-amp', 'Амплітуда: обличчя не знайдено — наведіть камеру на обличчя', false);
     } else {
       renderMetricLine('cam-angle', `Кут нахилу: ${metrics.tilt.toFixed(1)}° — ${metrics.isTiltOk
-        ? 'Норма (4°-6°)' : 'Нахиліть голову до 5°!'}`, metrics.isTiltOk);
+        ? `Норма (${TILT_NORM_MIN_DEG}°-${TILT_NORM_MAX_DEG}°)`
+        : `Тримайте кут ${TILT_NORM_MIN_DEG}°-${TILT_NORM_MAX_DEG}°!`}`, metrics.isTiltOk);
       renderMetricLine('cam-amp', `Амплітуда: ${metrics.amplitude}% — ${metrics.isAmplitudeOk
-        ? 'Чудово, тримайте!' : 'Відкрийте рот ширше (мінімум 95%)!'}`, metrics.isAmplitudeOk);
+        ? 'Чудово, тримайте!' : `Відкрийте рот ширше (мінімум ${AMPLITUDE_NORM_MIN}%)!`}`, metrics.isAmplitudeOk);
     }
     drawOverlay();
     if (isCounting()) trackHold(metrics.isNormal);
