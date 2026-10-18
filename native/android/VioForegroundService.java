@@ -34,6 +34,13 @@ public class VioForegroundService extends Service {
         return START_NOT_STICKY;
     }
 
+    // Після закриття застосунку зі списку недавніх сесії вже немає, тож сервіс і його сповіщення не лишаються самі по собі
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        stopSelf();
+        super.onTaskRemoved(rootIntent);
+    }
+
     @Override
     public void onDestroy() {
         releaseWakeLock();

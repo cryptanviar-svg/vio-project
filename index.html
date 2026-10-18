@@ -377,7 +377,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
+function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRunningChange }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -388,6 +388,12 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
   let timerId = null;
   let st = null;
   let isMuted = false;
+  let stateListener = null;
+
+  // Аудіоядро реально працює лише в стані 'running': suspended/interrupted/closed означає, що слухання мікрофона мертве
+  function isRunning() {
+    return Boolean(ctx) && ctx.state === 'running';
+  }
 
   function setStatus(text) {
     if (st.status === text) return;
@@ -576,6 +582,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
+    stateListener = () => onRunningChange(isRunning());
+    context.addEventListener('statechange', stateListener);
     setStatus('Калібрування тиші…');
     timerId = setInterval(analyze, C.ANALYSIS_INTERVAL_MS);
   }
@@ -588,6 +596,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     stream.getTracks().forEach((track) => track.stop());
     const released = ctx;
+    released.removeEventListener('statechange', stateListener);
+    stateListener = null;
     ctx = null;
     chain.forEach((node) => node.disconnect());
     chain = [];
@@ -633,7 +643,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     master.gain.linearRampToValueAtTime(shouldMute ? 0 : C.MASTER_GAIN, t + C.MUTE_RAMP_S);
   }
 
-  return { start, stop, routeOutput, setMuted };
+  return { start, stop, routeOutput, setMuted, isRunning };
 }
 </script>
 
@@ -678,6 +688,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     isWakeLockPending: false,
     isWakeLockWarned: false,
     isStarting: false,
+    isServiceRunning: false,
     tickId: null,
     maskIdleId: null,
     maskShiftId: null
@@ -965,13 +976,30 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       await NativeSession.start();
     } catch (err) {
       console.error('VIO: не вдалося запустити фоновий сервіс', err);
+      state.isServiceRunning = false;
       logEvent('Фоновий сервіс не запущено — робота з вимкненим екраном не гарантується');
+      return;
     }
+    // Запуск міг завершитися (після запиту дозволу) вже після зупинки сесії: тоді сповіщення одразу знімається
+    if (!state.isServiceRunning) stopBackgroundService();
   }
 
   function stopBackgroundService() {
     if (!NativeSession) return;
     NativeSession.stop().catch((err) => console.error('VIO: не вдалося зупинити фоновий сервіс', err));
+  }
+
+  // Сповіщення «нічна сесія триває» існує лише поки нічна сесія активна й AudioContext справді в стані 'running'
+  function syncBackgroundService() {
+    const shouldRun = isNightSessionActive() && Boolean(state.engine) && state.engine.isRunning();
+    if (shouldRun === state.isServiceRunning) return;
+    state.isServiceRunning = shouldRun;
+    if (shouldRun) {
+      startBackgroundService();
+      return;
+    }
+    stopBackgroundService();
+    logEvent('Аудіоядро не працює — фонове сповіщення знято');
   }
 
   async function startSession(mode) {
@@ -982,7 +1010,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
         isBluetoothLabel: (label) => BLUETOOTH_PATTERN.test(label),
         onLog: logEvent,
         onStatus: setSessionStatus,
-        onLost: handleMicLost
+        onLost: handleMicLost,
+        onRunningChange: syncBackgroundService
       });
       state.isStarting = true;
       try {
@@ -1004,7 +1033,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
     if (mode === 'night') {
       armMask();
       acquireWakeLock();
-      startBackgroundService();
+      syncBackgroundService();
     }
   }
 
@@ -1019,6 +1048,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost }) {
       state.engine = null;
     }
     releaseWakeLock();
+    state.isServiceRunning = false;
     stopBackgroundService();
     const seconds = Math.round((Date.now() - s.start) / 1000);
     saveSessions([...loadSessions(), {
