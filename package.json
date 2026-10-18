@@ -16,7 +16,8 @@
   "dependencies": {
     "@capacitor/android": "^8.5.3",
     "@capacitor/core": "^8.5.3",
-    "@mediapipe/tasks-vision": "^1.1.1"
+    "@mediapipe/tasks-vision": "^1.1.1",
+    "@tensorflow/tfjs": "^4.22.0"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.3",
