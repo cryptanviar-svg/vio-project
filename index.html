@@ -652,6 +652,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       const samples = latestWindow();
       console.error(`[VIO ЧАС] latestWindow: ${(performance.now() - windowStartedAt).toFixed(1)} мс`);
       const scores = await scoreWindow(YamnetStore.model, samples);
+      samples.fill(0);
       console.error('[VIO АКТУАЛЬНО] Сирі дані отримано!');
       const snoring = scores[C.AI_SNORING_CLASS];
       console.log(`[VIO ШІ] Snoring score: ${snoring.toFixed(3)}`);
