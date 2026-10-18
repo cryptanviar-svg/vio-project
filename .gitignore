@@ -30,3 +30,7 @@ dist/
 build/
 
 ecc/
+
+# Нативна збірка Android (Capacitor)
+/www/
+/android/
