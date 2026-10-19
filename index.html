@@ -273,6 +273,9 @@ const ENGINE_CONFIG = Object.freeze({
   AI_CLASS_COUNT: 521,
   AI_SNORING_CLASS: 38,
   AI_SNORE_MIN_SCORE: 0.4,
+  // Швидкий тригер: Snoring понад AI_FAST_SCORE разом із RMS понад AI_FAST_RMS запускає Рефлекс одразу після класифікації
+  AI_FAST_SCORE: 0.25,
+  AI_FAST_RMS: 0.012,
   // RMS = 0 безперервно MIC_SILENT_MS означає мертвий аудіопотік: його перезапускають; кадр, що запізнився понад FRAME_STALL_MS, скидає відлік.
   // Інженерний тест примусово дає хропіння на FORCED_SNORE_MS
   MIC_SILENT_MS: 5000,
@@ -766,8 +769,13 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       const samples = latestWindow();
       const scores = await scoreWindow(YamnetStore.model, samples);
       samples.fill(0);
-      ai.isSnore = scores[C.AI_SNORING_CLASS] > C.AI_SNORE_MIN_SCORE;
+      const snoring = scores[C.AI_SNORING_CLASS];
+      const isFastHit = snoring > C.AI_FAST_SCORE && session.lastRms > C.AI_FAST_RMS;
+      ai.isSnore = snoring > C.AI_SNORE_MIN_SCORE || isFastHit;
       ai.updatedAt = performance.now();
+      if (isFastHit && st === session && !session.episode && ai.updatedAt >= session.lockoutUntil) {
+        startEpisode(ai.updatedAt, 'швидкий тригер: Snoring і гучний звук');
+      }
     } catch (err) {
       console.error('VIO: помилка класифікації YAMNet', err);
       ai.isReady = false;
@@ -862,6 +870,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     const rms = Math.sqrt(sum / buffer.length);
     detectSilentStream(rms, now);
+    st.lastRms = rms;
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
@@ -929,7 +938,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     master = out;
     buffer = new Float32Array(node.fftSize);
     st = {
-      startedAt: performance.now(), env: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
+      startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
       ai: {
         isReady: false, isBusy: false, isSnore: false, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
