@@ -123,6 +123,9 @@
           <label class="flex items-center gap-3 text-sm text-zinc-200">
             <input type="radio" name="hum-mode" value="tremolo"> Г: тремоло 8 Гц, гучність 10–100%
           </label>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="random"> Випадковий: усі п'ять режимів хаотично, зміна кожні 4–12 с
+          </label>
         </fieldset>
         <button id="test-snore-btn" type="button"
                 class="mt-4 px-4 py-2 bg-zinc-800 text-zinc-200 rounded border border-zinc-700 disabled:opacity-40">
@@ -297,6 +300,11 @@ const ENGINE_CONFIG = Object.freeze({
   TREMOLO_HZ: 8,
   TREMOLO_MIN_GAIN: 0.1,
   TREMOLO_MAX_GAIN: 1,
+  // Режим «Випадковий»: кожні RANDOM_SEGMENT_MIN_S–RANDOM_SEGMENT_MAX_S с гул переходить на інший режим, перехід займає RANDOM_FADE_MIN_S–RANDOM_FADE_MAX_S с
+  RANDOM_SEGMENT_MIN_S: 4,
+  RANDOM_SEGMENT_MAX_S: 12,
+  RANDOM_FADE_MIN_S: 0.15,
+  RANDOM_FADE_MAX_S: 0.3,
   RELEASE_TAIL_FACTOR: 5,
   PULSE_HZ: 4,
   PULSE_DEPTH: 0.3,
@@ -507,8 +515,15 @@ function scheduleClicks(context, destination, t0) {
 
 /* ---------- Режими синтезу гулу (вибір радіокнопками на вкладці «Ніч») ---------- */
 
-const HUM_MODES = Object.freeze(['base', 'jitter', 'binaural', 'noise', 'tremolo']);
+const HUM_BASE_MODES = Object.freeze(['base', 'jitter', 'binaural', 'noise', 'tremolo']);
+const HUM_MODES = Object.freeze([...HUM_BASE_MODES, 'random']);
+const HUM_LABELS = Object.freeze({
+  base: 'Базовий', jitter: 'А: хаотична частота', binaural: 'Б: бінауральні ритми', noise: 'В: рожевий шум зі спалахами',
+  tremolo: 'Г: тремоло', random: 'Випадковий'
+});
 let selectedHumMode = 'base';
+// Режим гулу, що звучав наприкінці попереднього епізоду: новий епізод у режимі «Випадковий» починається з іншого
+let lastEpisodeHumMode = null;
 // Кілька класів з найвищими оцінками: [{ index, score }] за спаданням
 function topClasses(scores, count) {
   const best = [];
@@ -645,6 +660,66 @@ const HUM_BUILDERS = Object.freeze({
   tremolo: buildTremoloHum
 });
 
+function randomUnit() {
+  const buffer = new Uint32Array(1);
+  crypto.getRandomValues(buffer);
+  return buffer[0] / 4294967296;
+}
+
+function randomBetween(min, max) {
+  return min + randomUnit() * (max - min);
+}
+
+// Випадковий режим із п'яти, але не той самий, що excludedMode
+function pickHumMode(excludedMode) {
+  const options = HUM_BASE_MODES.filter((mode) => mode !== excludedMode);
+  return options[Math.floor(randomUnit() * options.length)];
+}
+
+// План сегментів на totalS секунд: режим, початок, кінець (с від початку гулу), тривалість переходу на наступний режим; поспіль режим не повторюється
+function planRandomHum(firstMode, totalS) {
+  const C = ENGINE_CONFIG;
+  const segments = [];
+  let start = 0;
+  let mode = firstMode;
+  let fadeIn = randomBetween(C.RANDOM_FADE_MIN_S, C.RANDOM_FADE_MAX_S);
+  while (start < totalS) {
+    const duration = randomBetween(C.RANDOM_SEGMENT_MIN_S, C.RANDOM_SEGMENT_MAX_S);
+    const fadeOut = randomBetween(C.RANDOM_FADE_MIN_S, C.RANDOM_FADE_MAX_S);
+    segments.push({ mode, start, end: Math.min(start + duration, totalS), fadeIn, fadeOut });
+    start += duration;
+    fadeIn = fadeOut;
+    mode = pickHumMode(mode);
+  }
+  return segments;
+}
+
+// Режим «Випадковий»: усі сегменти плануються наперед на аудіочасовій шкалі, кожен має власну обвідку з fade-in і fade-out (перехресне згасання без клацання)
+function scheduleRandomHum(context, humGain, t0, t1, tEnd) {
+  const segments = planRandomHum(pickHumMode(lastEpisodeHumMode), tEnd - t1).map((segment) => {
+    const startAt = t1 + segment.start;
+    const endAt = t1 + segment.end;
+    const stopAt = endAt + segment.fadeOut + 0.05;
+    const sources = [];
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0, startAt);
+    gain.gain.linearRampToValueAtTime(1, startAt + segment.fadeIn);
+    gain.gain.setValueAtTime(1, endAt);
+    gain.gain.linearRampToValueAtTime(0, endAt + segment.fadeOut);
+    HUM_BUILDERS[segment.mode](context, startAt, sources).connect(gain);
+    gain.connect(humGain);
+    sources.forEach((source) => source.stop(stopAt));
+    return { mode: segment.mode, startAt, stopAt, sources };
+  });
+  return {
+    plan: segments.map(({ mode, startAt }) => ({ offsetMs: (startAt - t0) * 1000, mode })),
+    activeModeAt: (time) => (segments.filter((segment) => segment.startAt <= time).pop() || segments[0]).mode,
+    stop: (when) => segments.forEach((segment) => {
+      if (segment.stopAt > when) segment.sources.forEach((source) => source.stop(when));
+    })
+  };
+}
+
 // Усі режими проходять через спільну обвідку розгону humGain і далі через destination (master-gain), тож Mute їх глушить
 function scheduleHum(context, destination, t0) {
   const C = ENGINE_CONFIG;
@@ -654,22 +729,33 @@ function scheduleHum(context, destination, t0) {
   const humGain = context.createGain();
   humGain.gain.setValueAtTime(C.HUM_MICRO_GAIN, t1);
   humGain.gain.linearRampToValueAtTime(C.HUM_END_GAIN, tEnd);
-  HUM_BUILDERS[selectedHumMode](context, t1, sources).connect(humGain);
   humGain.connect(destination);
-  return { stop: (when) => sources.forEach((source) => source.stop(when)) };
+  if (selectedHumMode === 'random') {
+    return scheduleRandomHum(context, humGain, t0, t1, t0 + C.ATTACK_MAX_MS / 1000);
+  }
+  HUM_BUILDERS[selectedHumMode](context, t1, sources).connect(humGain);
+  return {
+    plan: [{ offsetMs: C.STAGE1_MS, mode: selectedHumMode }],
+    activeModeAt: () => selectedHumMode,
+    stop: (when) => sources.forEach((source) => source.stop(when))
+  };
 }
 
 // Запускає повну атаку; stop() плавно гасить звук (гул тримається на піку, доки його не зупинено)
-function startAttack(context, destination) {
+function startAttack(context, destination, onModeStart = () => {}) {
   const t0 = context.currentTime + 0.02;
   const out = context.createGain();
   out.connect(destination);
   scheduleClicks(context, out, t0);
   const hum = scheduleHum(context, out, t0);
+  // Режими гулу, що вмикаються під час епізоду, повідомляються в момент вмикання (для «Звітів»)
+  const modeTimers = hum.plan.map(({ offsetMs, mode }) => setTimeout(() => onModeStart(mode), offsetMs));
   return {
     stop() {
       const C = ENGINE_CONFIG;
       const t = context.currentTime;
+      modeTimers.forEach(clearTimeout);
+      lastEpisodeHumMode = hum.activeModeAt(t);
       out.gain.cancelScheduledValues(t);
       out.gain.setValueAtTime(out.gain.value, t);
       out.gain.setTargetAtTime(0, t, C.RELEASE_S);
@@ -767,7 +853,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function startEpisode(now, reason) {
     if (isCalibrating) return;
-    st.episode = { start: now, lastActive: now, attack: startAttack(ctx, master), isStage2: false, nextVibAt: 0 };
+    const attack = startAttack(ctx, master, (mode) => onLog(`Режим гулу: ${HUM_LABELS[mode]}`));
+    st.episode = { start: now, lastActive: now, attack, isStage2: false, nextVibAt: 0 };
     setStatus('Хропіння виявлено — Рефлекс 1');
     onLog(`Хропіння підтверджено (${reason}) — Рефлекс 1: серія кліків 4 кГц по черзі в ліве й праве вухо`);
   }
@@ -2093,7 +2180,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     renderMicTestButton();
     renderCalibrationButton();
     const isMicModeLocked = Boolean(s) || state.isStarting || isTestActive();
-    document.querySelectorAll('input[name="mic-mode"]').forEach((radio) => { radio.disabled = isMicModeLocked; });
+    document.querySelectorAll('input[name="mic-mode"], input[name="hum-mode"]').forEach((radio) => { radio.disabled = isMicModeLocked; });
     renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
   }
