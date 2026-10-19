@@ -13,11 +13,11 @@ const SAMPLES_DIR = 'tools/samples';
 const POSITIVE_CLASS = 'snoring';
 const NEGATIVE_CLASSES = ['breathing', 'coughing', 'sneezing', 'mouse_click', 'keyboard_typing', 'door_wood_knock', 'dog', 'vacuum_cleaner', 'clock_tick'];
 const RULES = Object.freeze([
-  { name: '2 с за 8 с', hits: 2, windowMs: 8000 },
-  { name: '2 с за 30 с', hits: 2, windowMs: 30000 },
-  { name: '3 с за 30 с', hits: 3, windowMs: 30000 }
+  { name: 'А: 2 с вище 0.20 за 30 с', hits: 2, windowMs: 30000, single: 0 },
+  { name: 'Б: А або одна секунда ≥ 0.50', hits: 2, windowMs: 30000, single: 0.5 },
+  { name: 'В: А або одна секунда ≥ 0.70', hits: 2, windowMs: 30000, single: 0.7 }
 ]);
-const CURRENT_RULE_INDEX = 1;
+const CURRENT_RULE_INDEX = 0;
 const PAIR_GAP_S = 12;
 const NEGATIVE_PAIRS_PER_CLASS = 10;
 const FAKE_DAY_START_MS = new Date('2000-01-01T00:00:00').getTime();
@@ -179,13 +179,12 @@ async function buildTrace(signal, env, cache) {
 /* ---------- Правило підтвердження ---------- */
 
 function kindOf(reason) {
-  if (reason.startsWith('швидкий')) return 'fast';
-  if (reason.startsWith('підтвердження')) return 'score';
-  return 'loud';
+  if (reason.startsWith('причина: гучність')) return 'loud';
+  return reason.includes('швидкий тригер') ? 'fast' : 'score';
 }
 
 function simulateRule(trace, env, rule) {
-  const C = { ...env.C, AI_CONFIRM_HITS: rule.hits, AI_CONFIRM_WINDOW_MS: rule.windowMs };
+  const C = { ...env.C, AI_CONFIRM_HITS: rule.hits, AI_CONFIRM_WINDOW_MS: rule.windowMs, AI_SINGLE_SCORE: rule.single };
   const ai = Core.createAiState();
   ai.isReady = true;
   const st = { ai, episode: null, lockoutUntil: 0, loudSince: null, isActive: false };

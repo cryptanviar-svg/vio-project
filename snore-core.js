@@ -75,7 +75,11 @@
   }
 
   function describeConfirmation(hits, C, threshold, classLabel) {
-    return `підтвердження скором (поріг ${threshold.toFixed(2)}, ${hits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с): ${hits.map((hit) => formatHit(hit, classLabel)).join(' і ')}`;
+    return `причина: модель — підтвердження скором (поріг ${threshold.toFixed(2)}, ${hits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с): ${hits.map((hit) => formatHit(hit, classLabel)).join(' і ')}`;
+  }
+
+  function describeStrongHit(hit, C, classLabel) {
+    return `причина: модель — підтвердження однією сильною секундою (Snoring від ${C.AI_SINGLE_SCORE.toFixed(2)}): ${formatHit(hit, classLabel)}`;
   }
 
   // Нейромережа спить, але сигнал ще може триматися: він гасне лише після AI_HOLD_QUIET_MS без секунди зі Snoring понад AI_HOLD_SCORE
@@ -98,12 +102,16 @@
     if (snoring > C.AI_HOLD_SCORE) ai.lastWeakAt = now;
     const freshHits = ai.snoreHits.filter((hit) => now - hit.at < C.AI_CONFIRM_WINDOW_MS);
     ai.snoreHits = isAboveThreshold ? [...freshHits, { at: now, wall, snoring, top }] : freshHits;
-    const isScoreConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
-    const fastReason = `швидкий тригер: Snoring ${snoring.toFixed(2)} і RMS ${rms.toFixed(3)}, ${ai.fastHits} класифікації поспіль`;
+    const isStrongHit = C.AI_SINGLE_SCORE > 0 && snoring >= C.AI_SINGLE_SCORE;
+    const isScoreConfirmed = isStrongHit || (isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS);
+    const fastReason = `причина: модель — швидкий тригер: Snoring ${snoring.toFixed(2)} і RMS ${rms.toFixed(3)}, ${ai.fastHits} класифікації поспіль`;
     const isHeld = ai.isSnore && now - ai.lastWeakAt < C.AI_HOLD_QUIET_MS;
     ai.isSnore = isScoreConfirmed || isFastConfirmed || isHeld;
     if (isScoreConfirmed) {
-      ai.snoreReason = describeConfirmation(ai.snoreHits.slice(-C.AI_CONFIRM_HITS), C, threshold, classLabel);
+      const isPairConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
+      ai.snoreReason = isPairConfirmed
+        ? describeConfirmation(ai.snoreHits.slice(-C.AI_CONFIRM_HITS), C, threshold, classLabel)
+        : describeStrongHit(ai.snoreHits[ai.snoreHits.length - 1], C, classLabel);
       ai.snoreHits = [];
     } else if (isFastConfirmed) {
       ai.snoreReason = fastReason;
@@ -130,7 +138,7 @@
     st.isActive = isSnoreHit || isLoudHit || isForced;
     if (!st.isActive || !canStartEpisode(st, now)) return null;
     if (isSnoreHit) return ai.snoreReason;
-    if (isLoudHit) return `гучний звук: RMS ${rms.toFixed(3)} понад ${C.LOUD_RMS} довше ${C.LOUD_HOLD_MS / 1000} с`;
+    if (isLoudHit) return `причина: гучність — гучний звук: RMS ${rms.toFixed(3)} понад ${C.LOUD_RMS} довше ${C.LOUD_HOLD_MS / 1000} с`;
     return 'інженерний тест';
   }
 

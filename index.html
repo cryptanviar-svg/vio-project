@@ -311,6 +311,8 @@ const ENGINE_CONFIG = Object.freeze({
   // Підтвердження: щонайменше AI_CONFIRM_HITS секунд зі Snoring понад поріг протягом AI_CONFIRM_WINDOW_MS
   AI_CONFIRM_HITS: 2,
   AI_CONFIRM_WINDOW_MS: 30000,
+  // Або одна секунда зі Snoring від AI_SINGLE_SCORE (0 вимикає): правило В із порівняння в tools/replay
+  AI_SINGLE_SCORE: 0.7,
   // Після спрацювання сигнал тримається, доки не мине AI_HOLD_QUIET_MS без жодної секунди зі Snoring понад AI_HOLD_SCORE
   AI_HOLD_SCORE: 0.1,
   AI_HOLD_QUIET_MS: 10000,
@@ -714,6 +716,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   let stateListener = null;
   let isCalibrating = false;
   let isHeadsetConfirmed = false;
+  let isStartAborted = false;
 
   // Аудіоядро реально працює лише в стані 'running': suspended/interrupted/closed означає, що слухання мікрофона мертве
   function isRunning() {
@@ -985,6 +988,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       throw new Error('Цей браузер не дає доступу до мікрофона.');
     }
     VioAudio.unlock();
+    isStartAborted = false;
     // Мікрофон гарнітури має бути підключений ДО getUserMedia, інакше потік відкриється на іншому джерелі й віддасть нулі
     isHeadsetConfirmed = Boolean(await prepareMic());
     let micStream;
@@ -995,6 +999,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     } catch (err) {
       console.error('VIO: помилка getUserMedia', err);
       throw new Error(micErrorMessage(err));
+    }
+    if (isStartAborted) {
+      micStream.getTracks().forEach((track) => track.stop());
+      throw new Error('Старт скасовано.');
     }
     // Жорсткий resume після отримання потоку: без стану 'running' аналізатор віддає нулі
     try {
@@ -1097,7 +1105,12 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     isCalibrating = shouldCalibrate;
   }
 
-  return { start, stop, setMuted, isRunning, isMicLive, forceSnore, setCalibrating };
+  // Скасовує старт, що завис: запізнілий мікрофонний потік буде закрито
+  function abortStart() {
+    isStartAborted = true;
+  }
+
+  return { start, stop, abortStart, setMuted, isRunning, isMicLive, forceSnore, setCalibrating };
 }
 </script>
 
@@ -1117,6 +1130,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const MAX_MIC_RESTARTS = 1;
   const HEADSET_MIC_TIMEOUT_MS = 3000;
   const HEADSET_RETRY_MS = 10000;
+  const START_TIMEOUT_MS = 15000;
   const TEST_FFT_SIZE = 4096;
   const TEST_UPDATE_MS = 100;
   const TEST_REPORT_MS = 5000;
@@ -1620,6 +1634,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   // Сповіщення «нічна сесія триває» існує лише поки нічна сесія активна й AudioContext справді в стані 'running'
   function syncBackgroundService() {
+    if (state.isStarting) return;
     const isListening = Boolean(state.engine) && state.engine.isRunning();
     const shouldRun = isNightSessionActive() && (isListening || state.session.isWaitingHeadset);
     if (shouldRun === state.isServiceRunning) return;
@@ -1680,6 +1695,22 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
   }
 
+  // Старт, що не відповів за START_TIMEOUT_MS (типово сторінку згорнуто), скасовується, щоб не лишати мікрофон і кнопку в підвішеному стані
+  async function startEngineWithTimeout(engine) {
+    let timerId = null;
+    const timeout = new Promise((_, reject) => {
+      timerId = setTimeout(() => {
+        engine.abortStart();
+        reject(new Error(`Старт мікрофона не відповів за ${START_TIMEOUT_MS / 1000} с. Залиште екран увімкненим і спробуйте ще раз.`));
+      }, START_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([engine.start(), timeout]);
+    } finally {
+      clearTimeout(timerId);
+    }
+  }
+
   async function startSession(mode) {
     if (state.session || state.isStarting || isTestActive()) return;
     showAlert('');
@@ -1688,13 +1719,23 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: нічна сесія працює лише з гарнітурою.`);
         return;
       }
+      // Зі згорнутою сторінкою (екран вимкнено) Android не дає ні фоновий сервіс, ні мікрофон: старт завис би
+      if (document.visibilityState !== 'visible') {
+        showAlert('Екран вимкнено або застосунок згорнуто: розбудіть екран і натисніть «Почати нічну сесію» ще раз.');
+        return;
+      }
       await loadClassNames();
       const engine = buildEngine(false);
       state.micRestarts = 0;
       state.isStarting = true;
+      // Фоновий сервіс стартує одразу, поки застосунок точно на екрані: пізніше, з вимкненим екраном, Android його не дозволить
+      state.isServiceRunning = true;
+      startBackgroundService();
       try {
-        await engine.start();
+        await startEngineWithTimeout(engine);
       } catch (err) {
+        state.isServiceRunning = false;
+        stopBackgroundService();
         releaseHeadsetMic();
         showAlert(err.message);
         return;
