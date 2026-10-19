@@ -33,7 +33,7 @@ public class AudioRoutePlugin extends Plugin {
     private static final String EVENT_ROUTE_CHANGED = "routeChanged";
     private static final String KIND_BLUETOOTH = "bluetooth";
     private static final String KIND_NONE = "none";
-    private static final int DEFAULT_TIMEOUT_MS = 8000;
+    private static final int DEFAULT_TIMEOUT_MS = 3000;
     private static final long POLL_INTERVAL_MS = 200;
     private static final long RECONNECT_PAUSE_MS = 800;
 
@@ -127,7 +127,40 @@ public class AudioRoutePlugin extends Plugin {
         result.put("connected", isConnected);
         result.put("waitedMs", waitedMs);
         result.put("reason", reason);
+        result.put("android", "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
+        result.put("devices", describeDevices());
         return result;
+    }
+
+    // Пристрої зв'язку (Android 12+) або входи (старіші версії) з типами — для діагностики підключення гарнітури
+    private String describeDevices() {
+        List<AudioDeviceInfo> devices = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            ? audioManager.getAvailableCommunicationDevices()
+            : java.util.Arrays.asList(audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS));
+        if (devices.isEmpty()) return "список порожній";
+        StringBuilder text = new StringBuilder();
+        for (AudioDeviceInfo device : devices) {
+            if (text.length() > 0) text.append("; ");
+            text.append(typeName(device.getType())).append(" «").append(device.getProductName()).append('»');
+        }
+        return text.toString();
+    }
+
+    private String typeName(int type) {
+        switch (type) {
+            case AudioDeviceInfo.TYPE_BUILTIN_MIC: return "вбудований мікрофон";
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE: return "розмовний динамік";
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER: return "динамік";
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO: return "BLUETOOTH_SCO";
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP: return "BLUETOOTH_A2DP";
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET: return "дротова гарнітура";
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES: return "дротові навушники";
+            case AudioDeviceInfo.TYPE_USB_HEADSET: return "USB-гарнітура";
+            case AudioDeviceInfo.TYPE_TELEPHONY: return "телефонія";
+            default:
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && type == AudioDeviceInfo.TYPE_BLE_HEADSET) return "BLE_HEADSET";
+                return "тип " + type;
+        }
     }
 
     // Android 12+: обираємо пристрій зв'язку «гарнітура» і чекаємо, поки система визнає його активним, а вхід гарнітури з'явиться

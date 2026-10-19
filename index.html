@@ -1055,7 +1055,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const HUM_MODE_KEY = 'vio.humMode';
   const MAX_STORED_EVENTS = 200;
   const MAX_MIC_RESTARTS = 1;
-  const HEADSET_MIC_TIMEOUT_MS = 8000;
+  const HEADSET_MIC_TIMEOUT_MS = 3000;
   const HEADSET_RETRY_MS = 10000;
   const NIGHT_NEEDS_HEADSET_LABEL = 'Підключіть Bluetooth-гарнітуру';
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
@@ -1346,19 +1346,26 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     NativeAudioRoute.disconnectHeadsetMic().catch((err) => console.error('VIO: не вдалося вимкнути мікрофон гарнітури', err));
   }
 
-  // Вмикає мікрофон гарнітури й чекає підтвердження; без підтвердження сесія не стартує, щоб не слухати мікрофоном телефону
+  // Вмикає мікрофон гарнітури й чекає підтвердження до HEADSET_MIC_TIMEOUT_MS; без підтвердження сесія все одно стартує
   async function connectHeadsetMic(isForced) {
     if (!NativeAudioRoute) {
       logEvent('Мікрофон гарнітури: нативне керування недоступне в браузері, вибір мікрофона лишається за системою');
       return;
     }
-    const result = await NativeAudioRoute.connectHeadsetMic({ timeoutMs: HEADSET_MIC_TIMEOUT_MS, force: isForced });
-    const waited = (result.waitedMs / 1000).toFixed(1);
-    if (!result.connected) {
-      logEvent(`Мікрофон гарнітури НЕ підключився за ${waited} с: ${result.reason}`);
-      throw new Error('Мікрофон Bluetooth-гарнітури не підключився. Перевірте гарнітуру й спробуйте ще раз.');
+    let result;
+    try {
+      result = await NativeAudioRoute.connectHeadsetMic({ timeoutMs: HEADSET_MIC_TIMEOUT_MS, force: isForced });
+    } catch (err) {
+      console.error('VIO: помилка підключення мікрофона гарнітури', err);
+      logEvent(`Мікрофон гарнітури: помилка підключення (${err.message}); відкриваю мікрофон без підтвердження`);
+      return;
     }
-    logEvent(`Мікрофон гарнітури підключено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`);
+    const waited = (result.waitedMs / 1000).toFixed(1);
+    logEvent(`Система: ${result.android}; пристрої зв'язку: ${result.devices}`);
+    // Відсутність підтвердження не блокує старт: про проблему скаже лише RMS = 0 понад MIC_SILENT_MS
+    logEvent(result.connected
+      ? `Мікрофон гарнітури підтверджено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`
+      : `Мікрофон гарнітури не підтверджено за ${waited} с (${result.reason}); відкриваю мікрофон і слухаю далі`);
   }
 
   /* ---------- Сесії ---------- */
