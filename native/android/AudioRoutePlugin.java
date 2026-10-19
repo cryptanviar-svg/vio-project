@@ -36,6 +36,8 @@ public class AudioRoutePlugin extends Plugin {
     private static final int DEFAULT_TIMEOUT_MS = 3000;
     private static final long POLL_INTERVAL_MS = 200;
     private static final long RECONNECT_PAUSE_MS = 800;
+    private static final String REASON_NO_DEVICE = "no-device";
+    private static final String REASON_NOT_CONFIRMED = "not-confirmed";
 
     private AudioManager audioManager;
     private AudioDeviceCallback deviceCallback;
@@ -106,13 +108,22 @@ public class AudioRoutePlugin extends Plugin {
                     releaseRouting();
                     Thread.sleep(RECONNECT_PAUSE_MS);
                 }
-                audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                 long deadline = startedAt + timeoutMs;
-                boolean isConnected = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                    ? connectModern(deadline)
-                    : connectLegacy(deadline);
-                long waited = SystemClock.elapsedRealtime() - startedAt;
-                call.resolve(connectResult(isConnected, waited, isConnected ? "" : "гарнітура не підтвердила підключення мікрофона"));
+                String reason = "";
+                boolean isConnected;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // Режим дзвінка вмикаємо лише коли система справді пропонує гарнітуру; інакше звук лишається у звичайному режимі
+                    AudioDeviceInfo headset = waitForCommunicationHeadset(deadline);
+                    isConnected = headset != null && connectModern(headset, deadline);
+                    if (headset == null) reason = REASON_NO_DEVICE;
+                    else if (!isConnected) reason = REASON_NOT_CONFIRMED;
+                } else {
+                    audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                    isConnected = connectLegacy(deadline);
+                    if (!isConnected) reason = REASON_NOT_CONFIRMED;
+                }
+                if (!isConnected) releaseRouting();
+                call.resolve(connectResult(isConnected, SystemClock.elapsedRealtime() - startedAt, reason));
             } catch (InterruptedException err) {
                 Thread.currentThread().interrupt();
                 call.reject("Підключення мікрофона гарнітури перервано", err);
@@ -164,14 +175,23 @@ public class AudioRoutePlugin extends Plugin {
     }
 
     // Android 12+: обираємо пристрій зв'язку «гарнітура» і чекаємо, поки система визнає його активним, а вхід гарнітури з'явиться
-    private boolean connectModern(long deadline) throws InterruptedException {
-        while (SystemClock.elapsedRealtime() < deadline) {
+    private AudioDeviceInfo waitForCommunicationHeadset(long deadline) throws InterruptedException {
+        do {
             AudioDeviceInfo headset = findCommunicationHeadset();
-            if (headset != null && isHeadsetActive(headset)) return true;
-            if (headset != null) audioManager.setCommunicationDevice(headset);
+            if (headset != null) return headset;
+            Thread.sleep(POLL_INTERVAL_MS);
+        } while (SystemClock.elapsedRealtime() < deadline);
+        return null;
+    }
+
+    private boolean connectModern(AudioDeviceInfo headset, long deadline) throws InterruptedException {
+        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (isHeadsetActive(headset)) return true;
+            audioManager.setCommunicationDevice(headset);
             Thread.sleep(POLL_INTERVAL_MS);
         }
-        return false;
+        return isHeadsetActive(headset);
     }
 
     private AudioDeviceInfo findCommunicationHeadset() {

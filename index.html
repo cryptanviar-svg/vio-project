@@ -1057,6 +1057,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const MAX_MIC_RESTARTS = 1;
   const HEADSET_MIC_TIMEOUT_MS = 3000;
   const HEADSET_RETRY_MS = 10000;
+  const NO_HEADSET_DEVICE_REASON = 'no-device';
+  const PHONE_MIC_WARNING = 'Увага: Android не віддає мікрофон гарнітури, тому слухає вбудований мікрофон телефону. Покладіть телефон поруч із ліжком, а звук іде в гарнітуру.';
   const NIGHT_NEEDS_HEADSET_LABEL = 'Підключіть Bluetooth-гарнітуру';
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
   // У нативній оболонці Capacitor тип аудіовиходу й фоновий сервіс дає Android; у браузері цих плагінів немає
@@ -1363,9 +1365,16 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const waited = (result.waitedMs / 1000).toFixed(1);
     logEvent(`Система: ${result.android}; пристрої зв'язку: ${result.devices}`);
     // Відсутність підтвердження не блокує старт: про проблему скаже лише RMS = 0 понад MIC_SILENT_MS
-    logEvent(result.connected
-      ? `Мікрофон гарнітури підтверджено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`
-      : `Мікрофон гарнітури не підтверджено за ${waited} с (${result.reason}); відкриваю мікрофон і слухаю далі`);
+    if (result.connected) {
+      logEvent(`Мікрофон гарнітури підтверджено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`);
+      return;
+    }
+    if (result.reason === NO_HEADSET_DEVICE_REASON) {
+      logEvent(`Система не пропонує мікрофон гарнітури (SCO / BLE) за ${waited} с: режим дзвінка не вмикався, слухає вбудований мікрофон телефону`);
+      showAlert(PHONE_MIC_WARNING);
+      return;
+    }
+    logEvent(`Мікрофон гарнітури не підтверджено за ${waited} с (${result.reason}); відкриваю мікрофон і слухаю далі`);
   }
 
   /* ---------- Сесії ---------- */
