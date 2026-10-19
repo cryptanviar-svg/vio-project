@@ -69,6 +69,19 @@
                 class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
           Почати нічну сесію
         </button>
+        <button id="mic-test-toggle" type="button"
+                class="mt-3 w-full rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 active:bg-zinc-900">
+          Тест мікрофона
+        </button>
+        <div id="mic-test-panel" class="mt-4 hidden space-y-3 rounded-2xl border border-zinc-800 p-4">
+          <p id="mic-test-route" class="whitespace-pre-line text-xs leading-relaxed text-zinc-300"></p>
+          <div class="h-8 w-full overflow-hidden rounded-lg bg-zinc-900">
+            <div id="mic-test-bar" class="h-full w-0 bg-emerald-400"></div>
+          </div>
+          <p class="text-sm tabular-nums text-zinc-200">
+            RMS: <span id="mic-test-rms">0.00000</span> · максимум за 5 с: <span id="mic-test-peak">0.00000</span>
+          </p>
+        </div>
         <fieldset id="hum-mode-group" class="mt-6 space-y-2 border-t border-zinc-800 pt-4">
           <legend class="text-xs uppercase tracking-widest text-zinc-300">Режим сигналу (експеримент)</legend>
           <label class="flex items-center gap-3 text-sm text-zinc-200">
@@ -281,6 +294,7 @@ const ENGINE_CONFIG = Object.freeze({
   // RMS = 0 безперервно MIC_SILENT_MS означає мертвий аудіопотік: його перезапускають; кадр, що запізнився понад FRAME_STALL_MS, скидає відлік.
   // Інженерний тест примусово дає хропіння на FORCED_SNORE_MS
   MIC_SILENT_MS: 5000,
+  MIC_CONSTRAINTS: Object.freeze({ echoCancellation: false, noiseSuppression: false, autoGainControl: false }),
   FRAME_STALL_MS: 2500,
   FORCED_SNORE_MS: 3000,
   AI_STALE_MS: 2500
@@ -933,7 +947,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        audio: C.MIC_CONSTRAINTS
       });
     } catch (err) {
       console.error('VIO: помилка getUserMedia', err);
@@ -1057,6 +1071,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const MAX_MIC_RESTARTS = 1;
   const HEADSET_MIC_TIMEOUT_MS = 3000;
   const HEADSET_RETRY_MS = 10000;
+  const TEST_FFT_SIZE = 4096;
+  const TEST_UPDATE_MS = 100;
+  const TEST_REPORT_MS = 5000;
+  const TEST_METER_FULL_RMS = 0.1;
   const NO_HEADSET_DEVICE_REASON = 'no-device';
   const PHONE_MIC_WARNING = 'Увага: Android не віддає мікрофон гарнітури, тому слухає вбудований мікрофон телефону. Покладіть телефон поруч із ліжком, а звук іде в гарнітуру.';
   const NIGHT_NEEDS_HEADSET_LABEL = 'Підключіть Bluetooth-гарнітуру';
@@ -1382,6 +1400,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function logEvent(text) {
     console.info(`[VIO] ${text}`);
     const s = state.session;
+    if (!s && (state.isMicTestStarting || state.micTest)) {
+      addStandaloneEvent(text);
+      return;
+    }
     if (!s || s.events.length >= MAX_SESSION_EVENTS) return;
     s.events.push({ t: Date.now(), text });
   }
@@ -1535,7 +1557,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   async function startSession(mode) {
-    if (state.session || state.isStarting) return;
+    if (state.session || state.isStarting || state.micTest || state.isMicTestStarting) return;
     showAlert('');
     if (mode === 'night') {
       if (effectiveOutput() === 'none') {
@@ -1610,11 +1632,23 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         : 'Сесію не запущено';
       const needsHeadset = mode === 'night' && !s && effectiveOutput() === 'none';
       $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL : `Почати ${label} сесію`;
-      $(`${mode}-toggle`).disabled = blocked || needsHeadset;
-      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsHeadset);
+      const isTestBlocking = mode === 'night' && (Boolean(state.micTest) || state.isMicTestStarting);
+      $(`${mode}-toggle`).disabled = blocked || needsHeadset || isTestBlocking;
+      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsHeadset || isTestBlocking);
     }
+    renderMicTestButton();
     renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
+  }
+
+  function renderMicTestButton() {
+    const button = $('mic-test-toggle');
+    const isBusy = state.isMicTestStarting;
+    const needsHeadset = !state.micTest && effectiveOutput() === 'none';
+    const isBlocked = Boolean(state.session) || isBusy || needsHeadset;
+    button.textContent = state.micTest ? 'Зупинити тест' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL : isBusy ? 'Підключаю мікрофон…' : 'Тест мікрофона';
+    button.disabled = isBlocked;
+    button.classList.toggle('opacity-40', isBlocked);
   }
 
   /* ---------- OLED-маскування ---------- */
@@ -1744,6 +1778,126 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return li;
   }
 
+  /* ---------- Тест мікрофона ---------- */
+
+  function addStandaloneEvent(text) {
+    saveStandaloneEvents([...loadStandaloneEvents(), { t: Date.now(), text }]);
+    if (state.tab === 'reports') renderReports();
+  }
+
+  async function describeListening() {
+    if (!NativeAudioRoute) return 'Браузер: пристрій зв’язку недоступний, мікрофон обирає система';
+    try {
+      const info = await NativeAudioRoute.getCommunicationInfo();
+      return `Слухаємо: ${info.active}\nРежим: ${info.mode}\nДоступні пристрої: ${info.devices}`;
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати пристрій зв’язку', err);
+      return 'Не вдалося прочитати пристрій зв’язку';
+    }
+  }
+
+  function readTestRms(test) {
+    test.analyser.getFloatTimeDomainData(test.buffer);
+    let sum = 0;
+    for (let i = 0; i < test.buffer.length; i++) sum += test.buffer[i] * test.buffer[i];
+    return Math.sqrt(sum / test.buffer.length);
+  }
+
+  async function refreshTestRoute() {
+    const text = await describeListening();
+    if (state.micTest) $('mic-test-route').textContent = text;
+  }
+
+  function tickMicTest() {
+    const test = state.micTest;
+    if (!test) return;
+    const rms = readTestRms(test);
+    const now = performance.now();
+    test.samples.push({ t: now, rms });
+    while (now - test.samples[0].t > TEST_REPORT_MS) test.samples.shift();
+    const peak = test.samples.reduce((max, sample) => Math.max(max, sample.rms), 0);
+    test.reportMax = Math.max(test.reportMax, rms);
+    $('mic-test-bar').style.width = `${Math.round(Math.min(1, Math.sqrt(rms / TEST_METER_FULL_RMS)) * 100)}%`;
+    $('mic-test-rms').textContent = rms.toFixed(5);
+    $('mic-test-peak').textContent = peak.toFixed(5);
+    if (now - test.reportedAt < TEST_REPORT_MS) return;
+    addStandaloneEvent(`Тест мікрофона: максимальний RMS за 5 с = ${test.reportMax.toFixed(5)}`);
+    test.reportMax = 0;
+    test.reportedAt = now;
+    refreshTestRoute();
+  }
+
+  // Той самий старт мікрофона, що й у нічної сесії (connectHeadsetMic + getUserMedia), але без нейромережі й без звуків
+  async function startMicTest() {
+    if (state.session || state.micTest || state.isMicTestStarting || state.isStarting) return;
+    if (effectiveOutput() === 'none') {
+      showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: тест мікрофона працює лише з гарнітурою.`);
+      return;
+    }
+    showAlert('');
+    state.isMicTestStarting = true;
+    renderSession();
+    let stream = null;
+    try {
+      const context = VioAudio.getContext();
+      if (!context || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Web Audio або мікрофон недоступні в цьому браузері.');
+      }
+      VioAudio.unlock();
+      logEvent('Тест мікрофона: запуск');
+      await connectHeadsetMic(false);
+      stream = await navigator.mediaDevices.getUserMedia({ audio: ENGINE_CONFIG.MIC_CONSTRAINTS });
+      await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = TEST_FFT_SIZE;
+      source.connect(analyser);
+      const now = performance.now();
+      state.micTest = {
+        stream, source, analyser, buffer: new Float32Array(analyser.fftSize),
+        samples: [], reportMax: 0, reportedAt: now, intervalId: setInterval(tickMicTest, TEST_UPDATE_MS)
+      };
+      stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onTestMicLost));
+      $('mic-test-panel').classList.remove('hidden');
+      refreshTestRoute();
+    } catch (err) {
+      console.error('VIO: не вдалося запустити тест мікрофона', err);
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      releaseHeadsetMic();
+      showAlert(`Тест мікрофона не запустився: ${err.message}`);
+    } finally {
+      state.isMicTestStarting = false;
+      renderSession();
+    }
+  }
+
+  async function stopMicTest() {
+    const test = state.micTest;
+    if (!test) return;
+    clearInterval(test.intervalId);
+    test.source.disconnect();
+    test.stream.getTracks().forEach((track) => track.stop());
+    addStandaloneEvent('Тест мікрофона зупинено');
+    state.micTest = null;
+    $('mic-test-panel').classList.add('hidden');
+    renderSession();
+    if (!NativeAudioRoute) return;
+    try {
+      await NativeAudioRoute.disconnectHeadsetMic();
+      const info = await NativeAudioRoute.getCommunicationInfo();
+      addStandaloneEvent(`Режим аудіо після тесту: ${info.mode}`);
+    } catch (err) {
+      console.error('VIO: не вдалося повернути звичайний режим аудіо', err);
+      showAlert('Не вдалося повернути звичайний режим аудіо після тесту.');
+    }
+  }
+
+  function onTestMicLost() {
+    if (!state.micTest) return;
+    showAlert('Тест мікрофона зупинено: мікрофон втрачено (гарнітуру відключено?).');
+    stopMicTest();
+  }
+
   /* ---------- Режим сигналу ---------- */
 
   function readHumMode() {
@@ -1788,6 +1942,9 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         if (state.session) stopSession('user'); else startSession(mode);
       });
     }
+    $('mic-test-toggle').addEventListener('click', () => {
+      if (state.micTest) stopMicTest(); else startMicTest();
+    });
     $('output-action').addEventListener('click', onOutputAction);
     $('test-snore-btn').addEventListener('click', onSimulate);
     $('bt-banner-close').addEventListener('click', () => {

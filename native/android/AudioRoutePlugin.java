@@ -92,6 +92,31 @@ public class AudioRoutePlugin extends Plugin {
         runConnect(call);
     }
 
+    // Що саме слухаємо зараз: активний пристрій зв'язку, режим аудіо й список доступних пристроїв
+    @PluginMethod
+    public void getCommunicationInfo(PluginCall call) {
+        JSObject info = new JSObject();
+        String active = "немає (Android до 12 не повідомляє)";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo device = audioManager.getCommunicationDevice();
+            active = device == null ? "не обрано" : typeName(device.getType()) + " «" + device.getProductName() + "»";
+        }
+        info.put("active", active);
+        info.put("mode", modeName(audioManager.getMode()));
+        info.put("devices", describeDevices());
+        call.resolve(info);
+    }
+
+    private String modeName(int mode) {
+        switch (mode) {
+            case AudioManager.MODE_NORMAL: return "MODE_NORMAL";
+            case AudioManager.MODE_IN_COMMUNICATION: return "MODE_IN_COMMUNICATION";
+            case AudioManager.MODE_IN_CALL: return "MODE_IN_CALL";
+            case AudioManager.MODE_RINGTONE: return "MODE_RINGTONE";
+            default: return "режим " + mode;
+        }
+    }
+
     @PluginMethod
     public void disconnectHeadsetMic(PluginCall call) {
         releaseRouting();
