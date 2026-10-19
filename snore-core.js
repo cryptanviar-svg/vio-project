@@ -96,9 +96,11 @@
     ai.fastHits = 0;
   }
 
-  // Розмова: Speech від AI_SPEECH_MIN_SCORE або Speech серед AI_SPEECH_TOP_RANK найвищих класів
+  // Розмова: Speech від AI_SPEECH_MIN_SCORE або Speech серед AI_SPEECH_TOP_RANK найвищих класів зі скором від AI_SPEECH_TOP_MIN_SCORE
+  // (у тиші всі скори близькі до нуля, і Speech потрапляє в топ за рівністю)
   function isSpeechSecond(C, speech, top) {
-    return speech >= C.AI_SPEECH_MIN_SCORE || top.slice(0, C.AI_SPEECH_TOP_RANK).some((item) => item.index === C.AI_SPEECH_CLASS);
+    return speech >= C.AI_SPEECH_MIN_SCORE
+      || top.slice(0, C.AI_SPEECH_TOP_RANK).some((item) => item.index === C.AI_SPEECH_CLASS && item.score >= C.AI_SPEECH_TOP_MIN_SCORE);
   }
 
   // Одна класифікація (раз на секунду): оновлює підтвердження за скором, швидкий тригер і утримання сигналу.

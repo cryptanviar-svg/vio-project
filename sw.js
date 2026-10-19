@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'vio-v5.22';
+const CACHE_VERSION = 'vio-v5.23';
 const APP_SHELL = ['./', './index.html', './snore-core.js', './tailwind.css', './manifest.json', './icon.svg'];
 const TAILWIND_HOST = 'cdn.tailwindcss.com';
 

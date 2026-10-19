@@ -83,10 +83,6 @@
           <p id="calibration-hint" class="text-xs leading-relaxed text-zinc-300"></p>
           <table id="calibration-table" class="hidden w-full text-xs tabular-nums text-zinc-200"></table>
           <p id="calibration-result" class="whitespace-pre-line text-xs leading-relaxed text-zinc-300"></p>
-          <button id="calibration-apply" type="button"
-                  class="hidden w-full rounded-2xl bg-gold-500 py-3 text-sm font-semibold text-black active:opacity-80">
-            Застосувати рекомендований поріг
-          </button>
         </div>
         <div id="mic-test-panel" class="mt-4 hidden space-y-3 rounded-2xl border border-zinc-800 p-4">
           <p id="mic-test-route" class="whitespace-pre-line text-xs leading-relaxed text-zinc-300"></p>
@@ -327,6 +323,7 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SPEECH_CLASS: 0,
   AI_SPEECH_MIN_SCORE: 0.5,
   AI_SPEECH_TOP_RANK: 2,
+  AI_SPEECH_TOP_MIN_SCORE: 0.1,
   // Після спрацювання сигнал тримається, доки не мине AI_HOLD_QUIET_MS без жодної секунди зі Snoring понад AI_HOLD_SCORE
   AI_HOLD_SCORE: 0.1,
   AI_HOLD_QUIET_MS: 10000,
@@ -512,13 +509,6 @@ function scheduleClicks(context, destination, t0) {
 
 const HUM_MODES = Object.freeze(['base', 'jitter', 'binaural', 'noise', 'tremolo']);
 let selectedHumMode = 'base';
-// Поріг класу Snoring: за замовчуванням з конфігурації, а після калібрування — збережене користувачем значення
-let selectedSnoreThreshold = ENGINE_CONFIG.AI_SNORE_MIN_SCORE;
-
-function setSnoreThreshold(value) {
-  if (Number.isFinite(value) && value > 0 && value < 1) selectedSnoreThreshold = value;
-}
-
 // Кілька класів з найвищими оцінками: [{ index, score }] за спаданням
 function topClasses(scores, count) {
   const best = [];
@@ -845,13 +835,13 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const speech = scores[C.AI_SPEECH_CLASS];
       const { isFastConfirmed, fastReason, isSpeechBlocked } = VioCore.registerScore(ai, C, {
         now: performance.now(), wall: Date.now(), snoring, speech, rms: session.lastRms, top,
-        threshold: selectedSnoreThreshold, classLabel
+        threshold: C.AI_SNORE_MIN_SCORE, classLabel
       });
       if (isSpeechBlocked && !isCalibrating) {
         onLog(`Розмову відсіяно: Speech ${speech.toFixed(2)}, Snoring ${snoring.toFixed(2)} — секунду не враховано`);
       }
       onSample({
-        rms: session.lastRms, snoring, top,
+        rms: session.lastRms, snoring, speech, top,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
       if (isFastConfirmed && st === session && VioCore.canStartEpisode(session, ai.updatedAt)) {
@@ -1175,15 +1165,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const CLASS_MAP_URL = './vendor/yamnet/yamnet_class_map.csv';
   const CALIBRATION_TICK_MS = 250;
   const CALIBRATION_RAW_KEY = 'vio.calibrationRaw';
-  const CALIBRATION_THRESHOLDS = Object.freeze([0.2, 0.3, 0.4]);
-  const CALIBRATION_NOISE_FACTOR = 2;
-  const CALIBRATION_SCORED_KEYS = Object.freeze(['snoreOpen', 'snoreClosed', 'silence', 'speech']);
-  const CALIBRATION_MIN_THRESHOLD = 0.05;
-  const CALIBRATION_MIN_SAMPLES = 20;
+  const CALIBRATION_SCORED_KEYS = Object.freeze(['silence', 'speech']);
+  const CALIBRATION_MIN_SPEECH_SECONDS = 3;
+  const VOICE_WARNING = 'Мікрофон погано чує голос, хропіння може не розпізнаватись';
   const CALIBRATION_STAGES = Object.freeze([
     { key: 'prep', label: 'Підготовка', seconds: 5, hint: 'Лежіть тихо: підключається мікрофон і нейромережа.' },
-    { key: 'snoreOpen', label: 'Хропіння з відкритим ротом', seconds: 40, hint: 'Хропіть голосно й рівно з відкритим ротом.' },
-    { key: 'snoreClosed', label: 'Хропіння з закритим ротом, носом', seconds: 40, hint: 'Хропіть голосно й рівно із закритим ротом, носом.' },
     { key: 'silence', label: 'Тиша', seconds: 20, hint: 'Не рухайтесь і мовчіть.' },
     { key: 'speech', label: 'Розмова', seconds: 20, hint: 'Говоріть звичайним голосом.' }
   ]);
@@ -1235,7 +1221,6 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     isWakeLockWarned: false,
     isStarting: false,
     calibration: null,
-    calibrationResult: null,
     isCalibrationStarting: false,
     isRestarting: false,
     micRestarts: 0,
@@ -1369,7 +1354,6 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function isValidProfile(p) {
     return Boolean(p) && typeof p.key === 'string' && Number.isFinite(p.wakeRms) && p.wakeRms > 0
-      && Number.isFinite(p.snoreThreshold) && p.snoreThreshold > 0 && p.snoreThreshold < 1
       && Number.isFinite(p.calibratedAt);
   }
 
@@ -1427,7 +1411,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   function describeProfile(profile) {
-    return `калібровано ${new Date(profile.calibratedAt).toLocaleDateString('uk-UA')}, поріг Snoring ${profile.snoreThreshold.toFixed(2)}, AI_WAKE_RMS ${profile.wakeRms.toFixed(4)}`;
+    const voice = profile.hearsSpeech === false ? ', мікрофон погано чує голос' : '';
+    return `калібровано ${new Date(profile.calibratedAt).toLocaleDateString('uk-UA')}, AI_WAKE_RMS ${profile.wakeRms.toFixed(4)}${voice}`;
   }
 
   function renderDeviceStatus() {
@@ -1437,18 +1422,17 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const profile = loadProfile(device.key);
     el.textContent = profile
       ? `Профіль «${device.name}»: ${describeProfile(profile)}`
-      : `Профілю «${device.name}» немає: до першого калібрування діють стандартні пороги (Snoring ${ENGINE_CONFIG.AI_SNORE_MIN_SCORE.toFixed(2)}, AI_WAKE_RMS ${ENGINE_CONFIG.AI_WAKE_RMS})`;
+      : `Профілю «${device.name}» немає: до першого калібрування діє стандартний AI_WAKE_RMS ${ENGINE_CONFIG.AI_WAKE_RMS}`;
   }
 
-  // Вмикає пороги профілю активного пристрою; без профілю лишаються стандартні
+  // Вмикає профіль активного пристрою (поріг пробудження нейромережі); без профілю діє стандартний. Поріг Snoring і правила рефлексу однакові для всіх
   function applyDeviceProfile(source) {
     const device = deviceFor(source);
     const profile = loadProfile(device.key);
     state.device = { ...device, profile };
-    setSnoreThreshold(profile ? profile.snoreThreshold : ENGINE_CONFIG.AI_SNORE_MIN_SCORE);
     logEvent(profile
       ? `Профіль пристрою «${device.name}»: ${describeProfile(profile)}`
-      : `Профілю пристрою «${device.name}» немає: стандартні пороги (Snoring ${ENGINE_CONFIG.AI_SNORE_MIN_SCORE.toFixed(2)}, AI_WAKE_RMS ${ENGINE_CONFIG.AI_WAKE_RMS})`);
+      : `Профілю пристрою «${device.name}» немає: стандартний AI_WAKE_RMS ${ENGINE_CONFIG.AI_WAKE_RMS}`);
     renderDeviceStatus();
   }
 
@@ -1469,16 +1453,17 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const device = state.device;
     if (!device || scores.silence.length === 0) return null;
     const { silenceRms, wakeRms } = deriveWakeRms(scores.silence.map((sample) => sample.rms));
+    const speechSeconds = summarizeStage('Розмова', scores.speech).speechSeconds;
     const context = VioAudio.getContext();
     const profile = {
       key: device.key, deviceName: device.name, source: device.source, wakeRms, silenceRms,
-      snoreThreshold: selectedSnoreThreshold, sampleRate: context ? context.sampleRate : null,
-      isScoConfirmed: state.isScoConfirmed, calibratedAt: Date.now()
+      sampleRate: context ? context.sampleRate : null, isScoConfirmed: state.isScoConfirmed,
+      speechSeconds, hearsSpeech: speechSeconds >= CALIBRATION_MIN_SPEECH_SECONDS, calibratedAt: Date.now()
     };
     saveProfile(profile);
     state.device = { ...device, profile };
     renderDeviceStatus();
-    addStandaloneEvent(`Профіль пристрою «${device.name}» збережено: AI_WAKE_RMS ${wakeRms.toFixed(4)} (тиша RMS ${silenceRms.toFixed(4)}), поріг Snoring ${profile.snoreThreshold.toFixed(2)}, частота ${profile.sampleRate || 'невідомо'} Гц, SCO ${profile.isScoConfirmed ? 'підтверджено' : 'не підтверджено'}`);
+    addStandaloneEvent(`Профіль пристрою «${device.name}» збережено: AI_WAKE_RMS ${wakeRms.toFixed(4)} (тиша RMS ${silenceRms.toFixed(4)}), частота ${profile.sampleRate || 'невідомо'} Гц, SCO ${profile.isScoConfirmed ? 'підтверджено' : 'не підтверджено'}, Speech на розмові ${speechSeconds} с`);
     return profile;
   }
 
@@ -1742,7 +1727,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   function refreshMicWarning() {
-    showAlert(state.device && state.device.source === 'phone' ? PHONE_MIC_WARNING : '');
+    const device = state.device;
+    const messages = [];
+    if (device && device.source === 'phone') messages.push(PHONE_MIC_WARNING);
+    if (device && device.profile && device.profile.hearsSpeech === false) messages.push(VOICE_WARNING);
+    showAlert(messages.join('. '));
   }
 
   // У режимі Авто, коли мікрофон гарнітури пропав або заглушений, сесія продовжується на мікрофоні телефону
@@ -2000,7 +1989,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const device = predictedDevice();
       if (!loadProfile(device.key) && !readPrompted().includes(device.key)) {
         markPrompted(device.key);
-        const question = `Для пристрою «${device.name}» ще немає калібрування. Відкалібрувати зараз (близько 2 хв)? «Скасувати» — почати зі стандартними порогами.`;
+        const question = `Для пристрою «${device.name}» ще немає калібрування. Відкалібрувати зараз (менше хвилини)? «Скасувати» — почати зі стандартними порогами.`;
         if (window.confirm(question)) {
           startCalibration();
           return;
@@ -2194,7 +2183,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function buildReportText() {
     const live = state.session ? [{ ...state.session, endedBy: 'live' }] : [];
     const sessions = [...loadSessions(), ...live];
-    const lines = [`Звіт VIO, збережено ${formatReportTime(Date.now())}`, `Поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`, ''];
+    const lines = [`Звіт VIO, збережено ${formatReportTime(Date.now())}`, `Поріг Snoring: ${ENGINE_CONFIG.AI_SNORE_MIN_SCORE.toFixed(2)}`, ''];
     sessions.forEach((session) => {
       const modeLabel = session.mode === 'night' ? 'Ніч' : 'День';
       const endLabel = session.endedBy === 'user' ? 'зупинено користувачем' : session.endedBy === 'live' ? 'триває' : 'зупинено Fail-Safe';
@@ -2438,16 +2427,16 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function collectCalibrationSample(calibration, sample) {
     const stage = CALIBRATION_STAGES[calibration.stageIndex];
     calibration.raw.push({
-      t: Date.now(), stage: stage ? stage.key : 'end', stageLabel: stage ? stage.label : '', rms: sample.rms, snoring: sample.snoring,
+      t: Date.now(), stage: stage ? stage.key : 'end', stageLabel: stage ? stage.label : '', rms: sample.rms, snoring: sample.snoring, speech: sample.speech,
       top: sample.top.map((item) => ({ index: item.index, name: className(item.index), score: item.score }))
     });
-    if (stage && stage.key !== 'prep') calibration.scores[stage.key].push({ snoring: sample.snoring, rms: sample.rms });
+    if (stage && stage.key !== 'prep') calibration.scores[stage.key].push({ rms: sample.rms, speech: sample.speech, top: sample.top });
   }
 
   function saveCalibrationRaw(calibration) {
     try {
       localStorage.setItem(CALIBRATION_RAW_KEY, JSON.stringify({
-        startedAt: calibration.startedAt, snoreThreshold: selectedSnoreThreshold, samples: calibration.raw
+        startedAt: calibration.startedAt, samples: calibration.raw
       }));
     } catch (err) {
       console.error('VIO: не вдалося зберегти сирі дані калібрування', err);
@@ -2477,47 +2466,15 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return values.length > 0 ? values.reduce((sum, v) => sum + v, 0) / values.length : 0;
   }
 
-  // Статистика етапу з вибірок { snoring, rms }
+  // Статистика етапу з вибірок { rms, speech, top }; секунда з розмовою — за тим самим правилом, що й заборона Speech у двигуні
   function summarizeStage(label, samples) {
-    const count = samples.length;
-    const scores = samples.map((sample) => sample.snoring);
-    const max = count > 0 ? Math.max(...scores) : 0;
-    const shares = CALIBRATION_THRESHOLDS.map((limit) => (count > 0 ? scores.filter((v) => v > limit).length / count : 0));
-    return { label, count, mean: averageOf(scores), max, shares, meanRms: averageOf(samples.map((sample) => sample.rms)) };
-  }
-
-  // Найвищий скор, який перевищують щонайменше AI_CONFIRM_HITS секунд у будь-якому вікні AI_CONFIRM_WINDOW_MS (як у підтвердженні двигуна)
-  function bestEpisodeScore(series) {
-    const windowSize = ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / ENGINE_CONFIG.AI_HOP_MS;
-    let best = 0;
-    for (const scores of series) {
-      for (let i = 0; i + windowSize <= scores.length; i++) {
-        const sorted = scores.slice(i, i + windowSize).sort((a, b) => b - a);
-        best = Math.max(best, sorted[ENGINE_CONFIG.AI_CONFIRM_HITS - 1]);
-      }
-    }
-    return best;
-  }
-
-  // Поріг — найвищий, при якому епізод (≥2 с за 8 с) у хропінні ще перевищує його, і не менший за подвійний максимум тиші й розмови
-  function recommendThreshold(snoreSeries, noiseScores) {
-    const snoreCount = snoreSeries.reduce((sum, scores) => sum + scores.length, 0);
-    if (snoreCount < CALIBRATION_MIN_SAMPLES) {
-      return { value: null, reason: `Замало даних про хропіння (${snoreCount} с): класифікація не встигала або мікрофон мовчав.` };
-    }
-    const best = bestEpisodeScore(snoreSeries);
-    const value = Math.floor(best * 100) / 100 < best ? Math.floor(best * 100) / 100 : Math.round((best - 0.01) * 100) / 100;
-    const noiseMax = noiseScores.length > 0 ? Math.max(...noiseScores) : 0;
-    const floor = Math.max(noiseMax * CALIBRATION_NOISE_FACTOR, CALIBRATION_MIN_THRESHOLD);
-    if (value < floor) {
-      return {
-        value: null,
-        reason: `Поріг не підібрано: епізоди хропіння (≥${ENGINE_CONFIG.AI_CONFIRM_HITS} с за ${ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / 1000} с) сягають лише ${best.toFixed(3)}, а потрібно не менше ${floor.toFixed(3)} (двічі максимум тиші й розмови ${noiseMax.toFixed(3)}, мінімум ${CALIBRATION_MIN_THRESHOLD}).`
-      };
-    }
+    const rmsList = samples.map((sample) => sample.rms);
     return {
-      value,
-      reason: `Епізоди хропіння (≥${ENGINE_CONFIG.AI_CONFIRM_HITS} с за ${ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / 1000} с) сягають ${best.toFixed(3)}; максимум тиші й розмови ${noiseMax.toFixed(3)}.`
+      label,
+      count: samples.length,
+      meanRms: averageOf(rmsList),
+      maxRms: rmsList.length > 0 ? Math.max(...rmsList) : 0,
+      speechSeconds: samples.filter((sample) => VioCore.isSpeechSecond(ENGINE_CONFIG, sample.speech, sample.top)).length
     };
   }
 
@@ -2534,57 +2491,33 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function renderCalibrationTable(stages) {
     const table = $('calibration-table');
-    const header = ['Етап', 'Секунд', 'Сер. Snoring', 'Макс', ...CALIBRATION_THRESHOLDS.map((limit) => `>${limit.toFixed(2)}`), 'Сер. RMS'];
+    const header = ['Етап', 'Секунд', 'Сер. RMS', 'Макс RMS', 'Секунд зі Speech'];
     const rows = stages.map((stage) => [
-      stage.label, String(stage.count), stage.mean.toFixed(3), stage.max.toFixed(3),
-      ...stage.shares.map((share) => `${Math.round(share * 100)}%`), stage.meanRms.toFixed(4)
+      stage.label, String(stage.count), stage.meanRms.toFixed(4), stage.maxRms.toFixed(4), String(stage.speechSeconds)
     ]);
-    table.replaceChildren(buildCalibrationRow(header, 'th'), ...rows.map((cells) => buildCalibrationRow(cells, 'td')));
+        table.replaceChildren(buildCalibrationRow(header, 'th'), ...rows.map((cells) => buildCalibrationRow(cells, 'td')));
     table.classList.remove('hidden');
   }
 
   function showCalibrationResults(scores) {
-    const labelOf = (key) => CALIBRATION_STAGES.find((stage) => stage.key === key).label;
-    const stages = CALIBRATION_SCORED_KEYS.map((key) => summarizeStage(labelOf(key), scores[key]));
-    const snoreSeries = [scores.snoreOpen, scores.snoreClosed].map((samples) => samples.map((sample) => sample.snoring));
-    const noiseScores = [...scores.silence, ...scores.speech].map((sample) => sample.snoring);
-    const advice = recommendThreshold(snoreSeries, noiseScores);
+    const stages = CALIBRATION_SCORED_KEYS.map((key) => summarizeStage(CALIBRATION_STAGES.find((stage) => stage.key === key).label, scores[key]));
     const profile = saveCalibrationProfile(scores);
     renderCalibrationTable(stages);
-    state.calibrationResult = advice.value;
-    const current = `Поточний поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`
-      + (profile ? `\nПрофіль «${profile.deviceName}» збережено: AI_WAKE_RMS ${profile.wakeRms.toFixed(4)} (тиша RMS ${profile.silenceRms.toFixed(4)})` : '');
-    $('calibration-result').textContent = advice.value === null
-      ? `${advice.reason}\n${current}`
-      : `Рекомендований поріг: ${advice.value.toFixed(3)}. ${advice.reason}\n${current}`;
-    $('calibration-apply').classList.toggle('hidden', advice.value === null);
+    const lines = profile
+      ? [
+        `Профіль «${profile.deviceName}» збережено: AI_WAKE_RMS ${profile.wakeRms.toFixed(4)} (тиша RMS ${profile.silenceRms.toFixed(4)}), частота ${profile.sampleRate || 'невідомо'} Гц, SCO ${profile.isScoConfirmed ? 'підтверджено' : 'не підтверджено'}`,
+        profile.hearsSpeech ? `Модель чує голос: Speech на розмові ${profile.speechSeconds} с` : VOICE_WARNING
+      ]
+      : ['Профіль не збережено: немає даних етапу «Тиша».'];
+    $('calibration-result').textContent = lines.join('\n');
     $('calibration-stage').textContent = 'Калібрування завершено';
     $('calibration-timer').textContent = '✓';
     $('calibration-hint').textContent = '';
     stages.forEach((stage) => addStandaloneEvent(
-      `Калібрування, ${stage.label}: ${stage.count} с, середній ${stage.mean.toFixed(3)}, макс ${stage.max.toFixed(3)}, `
-      + CALIBRATION_THRESHOLDS.map((limit, i) => `>${limit.toFixed(2)}: ${Math.round(stage.shares[i] * 100)}%`).join(', ')
-      + `, середній RMS ${stage.meanRms.toFixed(4)}`
+      `Калібрування, ${stage.label}: ${stage.count} с, середній RMS ${stage.meanRms.toFixed(4)}, макс RMS ${stage.maxRms.toFixed(4)}, секунд зі Speech ${stage.speechSeconds}`
     ));
-    addStandaloneEvent(advice.value === null ? advice.reason : `Калібрування: рекомендований поріг Snoring ${advice.value.toFixed(3)}`);
-  }
-
-  function applyRecommendedThreshold() {
-    const value = state.calibrationResult;
-    if (value === null || value === undefined) return;
-    const previous = selectedSnoreThreshold;
-    setSnoreThreshold(value);
-    const device = state.device;
-    if (device && device.profile) {
-      const profile = { ...device.profile, snoreThreshold: value };
-      saveProfile(profile);
-      state.device = { ...device, profile };
-      renderDeviceStatus();
-    }
-    state.calibrationResult = null;
-    $('calibration-apply').classList.add('hidden');
-    $('calibration-result').textContent = `Поріг Snoring застосовано: ${value.toFixed(3)} (було ${previous.toFixed(3)}). Діє в нових сесіях і зберігається в профілі пристрою.`;
-    addStandaloneEvent(`Поріг Snoring змінено з ${previous.toFixed(3)} на ${value.toFixed(3)} за результатами калібрування`);
+    if (profile && !profile.hearsSpeech) addStandaloneEvent(VOICE_WARNING);
+    refreshMicWarning();
   }
 
   function renderCalibrationStage() {
@@ -2661,10 +2594,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       engine, stageIndex: 0, stageStartedAt: performance.now(), startedAt: Date.now(), raw: [],
       scores: Object.fromEntries(CALIBRATION_SCORED_KEYS.map((key) => [key, []])), timerId: setInterval(tickCalibration, CALIBRATION_TICK_MS)
     };
-    state.calibrationResult = null;
     $('calibration-table').classList.add('hidden');
     $('calibration-result').textContent = '';
-    $('calibration-apply').classList.add('hidden');
     $('calibration-panel').classList.remove('hidden');
     renderCalibrationStage();
     renderSession();
@@ -2734,7 +2665,6 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     $('calibration-toggle').addEventListener('click', () => {
       if (state.calibration) stopCalibration('скасовано користувачем'); else startCalibration();
     });
-    $('calibration-apply').addEventListener('click', applyRecommendedThreshold);
     $('output-action').addEventListener('click', onOutputAction);
     $('test-snore-btn').addEventListener('click', onSimulate);
     $('bt-banner-close').addEventListener('click', () => {
