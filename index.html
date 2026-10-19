@@ -309,7 +309,10 @@ const ENGINE_CONFIG = Object.freeze({
   AI_SNORE_MIN_SCORE: 0.2,
   // Підтвердження: щонайменше AI_CONFIRM_HITS секунд зі Snoring понад поріг протягом AI_CONFIRM_WINDOW_MS
   AI_CONFIRM_HITS: 2,
-  AI_CONFIRM_WINDOW_MS: 8000,
+  AI_CONFIRM_WINDOW_MS: 30000,
+  // Після спрацювання сигнал тримається, доки не мине AI_HOLD_QUIET_MS без жодної секунди зі Snoring понад AI_HOLD_SCORE
+  AI_HOLD_SCORE: 0.1,
+  AI_HOLD_QUIET_MS: 10000,
   DIAG_TOP_CLASSES: 3,
   // Швидкий тригер: Snoring понад AI_FAST_SCORE разом із RMS понад AI_FAST_RMS AI_FAST_HITS класифікацій поспіль запускає Рефлекс одразу після останньої
   AI_FAST_SCORE: 0.25,
@@ -693,7 +696,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent, onSample }) {
+function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent, onSample, classLabel = (index) => `клас ${index}` }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -823,6 +826,15 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   // Нейромережа спить, поки в кімнаті тихо: model.predict не викликається і CPU не навантажується.
   // Прокидається при RMS понад AI_WAKE_RMS, а засинає лише після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS (гістерезис), щоб паузи між вдихами не обривали аналіз
+  function describeHit(hit) {
+    const classes = hit.top.map((item) => `${classLabel(item.index)} ${item.score.toFixed(2)}`).join(', ');
+    return `${new Date(hit.wall).toLocaleTimeString('uk-UA')} Snoring ${hit.snoring.toFixed(2)} [${classes}]`;
+  }
+
+  function describeConfirmation(hits) {
+    return `підтвердження скором (поріг ${selectedSnoreThreshold.toFixed(2)}, ${hits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с): ${hits.map(describeHit).join(' і ')}`;
+  }
+
   async function classify() {
     const session = st;
     const ai = session.ai;
@@ -830,10 +842,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (now < ai.forcedUntil) return;
     if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
     if (!isCalibrating && !ai.isAwake) {
-      ai.isSnore = false;
+      ai.updatedAt = performance.now();
+      ai.isSnore = ai.isSnore && ai.updatedAt - ai.lastWeakAt < C.AI_HOLD_QUIET_MS;
       ai.snoreHits = [];
       ai.fastHits = 0;
-      ai.updatedAt = performance.now();
       return;
     }
     ai.isBusy = true;
@@ -846,16 +858,23 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       ai.fastHits = isFastHit ? ai.fastHits + 1 : 0;
       const isFastConfirmed = ai.fastHits >= C.AI_FAST_HITS;
       ai.updatedAt = performance.now();
+      const top = topClasses(scores, C.DIAG_TOP_CLASSES);
       const isAboveThreshold = snoring > selectedSnoreThreshold;
-      ai.snoreHits = [...ai.snoreHits.filter((t) => ai.updatedAt - t < C.AI_CONFIRM_WINDOW_MS), ...(isAboveThreshold ? [ai.updatedAt] : [])];
+      if (snoring > C.AI_HOLD_SCORE) ai.lastWeakAt = ai.updatedAt;
+      const freshHits = ai.snoreHits.filter((hit) => ai.updatedAt - hit.at < C.AI_CONFIRM_WINDOW_MS);
+      ai.snoreHits = isAboveThreshold ? [...freshHits, { at: ai.updatedAt, wall: Date.now(), snoring, top }] : freshHits;
       const isScoreConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
       const fastReason = `швидкий тригер: Snoring ${snoring.toFixed(2)} і RMS ${session.lastRms.toFixed(3)}, ${ai.fastHits} класифікації поспіль`;
-      ai.isSnore = isScoreConfirmed || isFastConfirmed;
-      ai.snoreReason = isScoreConfirmed
-        ? `підтвердження скором: Snoring ${snoring.toFixed(2)} вище порога ${selectedSnoreThreshold.toFixed(2)}, ${ai.snoreHits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с`
-        : fastReason;
+      const isHeld = ai.isSnore && ai.updatedAt - ai.lastWeakAt < C.AI_HOLD_QUIET_MS;
+      ai.isSnore = isScoreConfirmed || isFastConfirmed || isHeld;
+      if (isScoreConfirmed) {
+        ai.snoreReason = describeConfirmation(ai.snoreHits.slice(-C.AI_CONFIRM_HITS));
+        ai.snoreHits = [];
+      } else if (isFastConfirmed) {
+        ai.snoreReason = fastReason;
+      }
       onSample({
-        rms: session.lastRms, snoring, top: topClasses(scores, C.DIAG_TOP_CLASSES),
+        rms: session.lastRms, snoring, top,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
       if (isFastConfirmed && st === session && !session.episode && ai.updatedAt >= session.lockoutUntil) {
@@ -1092,7 +1111,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     st = {
       startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
       ai: {
-        isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreHits: [], fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
+        isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreHits: [], lastWeakAt: 0, fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
       silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
@@ -1699,7 +1718,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       onLost: handleMicLost,
       onRunningChange: syncBackgroundService,
       onSilent: restartEngine,
-      onSample: handleSample
+      onSample: handleSample,
+      classLabel: className
     });
   }
 
