@@ -823,6 +823,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (!ai.isReady || ai.isBusy || !aiInput.isFull()) return;
     if (!isCalibrating && !ai.isAwake) {
       VioCore.idleScore(ai, C, performance.now());
+      onSample({
+        rms: session.lastRms, isAwake: false, snoring: 0, speech: 0, top: [], isSpeech: false,
+        isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
+      });
       return;
     }
     ai.isBusy = true;
@@ -833,7 +837,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const snoring = scores[C.AI_SNORING_CLASS];
       const top = topClasses(scores, C.DIAG_TOP_CLASSES);
       const speech = scores[C.AI_SPEECH_CLASS];
-      const { isFastConfirmed, fastReason, isSpeechBlocked } = VioCore.registerScore(ai, C, {
+      const { isFastConfirmed, fastReason, isSpeech, isSpeechBlocked } = VioCore.registerScore(ai, C, {
         now: performance.now(), wall: Date.now(), snoring, speech, rms: session.lastRms, top,
         threshold: C.AI_SNORE_MIN_SCORE, classLabel
       });
@@ -841,7 +845,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         onLog(`Розмову відсіяно: Speech ${speech.toFixed(2)}, Snoring ${snoring.toFixed(2)} — секунду не враховано`);
       }
       onSample({
-        rms: session.lastRms, snoring, speech, top,
+        rms: session.lastRms, isAwake: true, snoring, speech, top, isSpeech,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
       if (isFastConfirmed && st === session && VioCore.canStartEpisode(session, ai.updatedAt)) {
@@ -977,7 +981,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
     st.lastRms = rms;
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
+    const wasAwake = st.ai.isAwake;
     VioCore.updateAiWakefulness(st.ai, st.env, wakeConfig, now);
+    if (st.ai.isAwake !== wasAwake && !isCalibrating) {
+      onLog(`Нейромережа ${st.ai.isAwake ? 'прокинулась' : 'заснула'}: RMS ${rms.toFixed(4)}, згладжений ${st.env.toFixed(4)}`);
+    }
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
       calibrate(now);
@@ -1157,8 +1165,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const TEST_UPDATE_MS = 100;
   const TEST_REPORT_MS = 5000;
   const TEST_METER_FULL_RMS = 0.1;
-  const DIAG_MIN_SNORING = 0.1;
-  const MAX_DIAG_ROWS = 4000;
+  const DIAG_MIN_RMS = 0.0005;
+  const MAX_DIAG_ROWS = 600;
   const LIVE_SESSION_KEY = 'vio.liveSession';
   const LIVE_SAVE_EVERY_S = 30;
   const REPORT_MIME = 'text/plain';
@@ -2454,7 +2462,29 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
   }
 
-  // Раз на секунду (коли Snoring вищий за DIAG_MIN_SNORING) пишемо в «Звіти», що чує нейромережа
+  // Секунда нічної сесії: RMS, чи нейромережа прокинута, Snoring і Speech, топ-3, чи секунду відсіяно забороною Speech
+  function formatSessionSecond(sample) {
+    const top = sample.top.length > 0 ? sample.top.map((item) => `${className(item.index)} ${item.score.toFixed(2)}`).join(', ') : '—';
+    const network = sample.isAwake ? 'прокинута' : 'спить';
+    const scores = sample.isAwake ? `Snoring ${sample.snoring.toFixed(2)}, Speech ${sample.speech.toFixed(2)}` : 'Snoring —, Speech —';
+    return `Секунда: RMS ${sample.rms.toFixed(4)}, нейромережа ${network}, ${scores}, топ-3: ${top}, заборона Speech: ${sample.isSpeech ? 'так' : 'ні'}`;
+  }
+
+  // Рядок діагностики секунди: найстаріші рядки діагностики витісняються, щоб журнал не розростався понад MAX_DIAG_ROWS
+  function logDiagRow(text) {
+    const s = state.session;
+    if (!s) return;
+    console.info(`[VIO] ${text}`);
+    if (s.diagRows >= MAX_DIAG_ROWS) {
+      const oldest = s.events.findIndex((event) => event.isDiag);
+      if (oldest >= 0) s.events.splice(oldest, 1);
+      s.diagRows -= 1;
+    }
+    s.events.push({ t: Date.now(), text, isDiag: true });
+    s.diagRows += 1;
+  }
+
+  // Кожна секунда, де RMS вищий за DIAG_MIN_RMS або нейромережа працювала, йде в журнал сесії без фільтра по Snoring
   function handleSample(sample) {
     const calibration = state.calibration;
     if (calibration) {
@@ -2463,13 +2493,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       logEvent(formatSample(sample, stage ? stage.label : ''));
       return;
     }
-    if (sample.snoring <= DIAG_MIN_SNORING) return;
-    const s = state.session;
-    if (s) {
-      if (s.diagRows >= MAX_DIAG_ROWS) return;
-      s.diagRows += 1;
-    }
-    logEvent(formatSample(sample));
+    if (!sample.isAwake && sample.rms <= DIAG_MIN_RMS) return;
+    logDiagRow(formatSessionSecond(sample));
   }
 
   function averageOf(values) {

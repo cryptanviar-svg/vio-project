@@ -104,7 +104,7 @@
   }
 
   // Одна класифікація (раз на секунду): оновлює підтвердження за скором, швидкий тригер і утримання сигналу.
-  // input: { now, wall, snoring, speech, rms, top, threshold, classLabel }; повертає { isFastConfirmed, fastReason, isSpeechBlocked }.
+  // input: { now, wall, snoring, speech, rms, top, threshold, classLabel }; повертає { isFastConfirmed, fastReason, isSpeechBlocked, isSpeech }.
   // Секунда з розмовою не враховується в жодному правилі (скор Snoring для неї вважається нульовим) і не продовжує утримання сигналу
   function registerScore(ai, C, input) {
     const { now, wall, speech, rms, top, threshold, classLabel } = input;
@@ -132,7 +132,7 @@
     } else if (isFastConfirmed) {
       ai.snoreReason = fastReason;
     }
-    return { isFastConfirmed, fastReason, isSpeechBlocked: isSpeech && input.snoring > C.AI_HOLD_SCORE };
+    return { isFastConfirmed, fastReason, isSpeech, isSpeechBlocked: isSpeech && input.snoring > C.AI_HOLD_SCORE };
   }
 
   function canStartEpisode(st, now) {
