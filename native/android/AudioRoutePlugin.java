@@ -341,7 +341,18 @@ public class AudioRoutePlugin extends Plugin {
         }
         JSObject route = new JSObject();
         route.put("kind", isBluetooth ? KIND_BLUETOOTH : KIND_NONE);
+        route.put("name", bluetoothOutputName());
         return route;
+    }
+
+    // Назва підключеного Bluetooth-виходу (порожня, якщо його немає): за нею застосунок розрізняє пристрої
+    private String bluetoothOutputName() {
+        for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            if (!isBluetoothType(device.getType())) continue;
+            CharSequence name = device.getProductName();
+            return name == null ? "" : name.toString();
+        }
+        return "";
     }
 
     private boolean isBluetoothType(int type) {

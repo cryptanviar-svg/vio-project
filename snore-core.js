@@ -54,6 +54,12 @@
     };
   }
 
+  // Конфігурація з порогом пробудження пристрою: поріг засинання зберігає пропорцію стандартної пари AI_WAKE_RMS / AI_SLEEP_RMS
+  function scaleWake(C, wakeRms) {
+    if (wakeRms === C.AI_WAKE_RMS) return C;
+    return { ...C, AI_WAKE_RMS: wakeRms, AI_SLEEP_RMS: wakeRms * (C.AI_SLEEP_RMS / C.AI_WAKE_RMS) };
+  }
+
   // Гістерезис нейромережі: прокидання при env > AI_WAKE_RMS, засинання після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS
   function updateAiWakefulness(ai, env, C, now) {
     if (env > C.AI_WAKE_RMS) {
@@ -143,5 +149,5 @@
     return 'інженерний тест';
   }
 
-  return { isSpeechSecond, createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
+  return { scaleWake, isSpeechSecond, createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
 });
