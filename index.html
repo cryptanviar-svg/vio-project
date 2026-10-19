@@ -69,6 +69,24 @@
                 class="btn-primary mt-6 w-full rounded-2xl bg-gold-500 py-4 text-base font-semibold text-black active:opacity-80">
           Почати нічну сесію
         </button>
+        <fieldset id="hum-mode-group" class="mt-6 space-y-2 border-t border-zinc-800 pt-4">
+          <legend class="text-xs uppercase tracking-widest text-zinc-300">Режим сигналу (експеримент)</legend>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="base" checked> Базовий: 350 Гц, пульсація 4 Гц
+          </label>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="jitter"> А: хаотична частота 320–380 Гц
+          </label>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="binaural"> Б: бінауральні ритми 350/355 Гц (стереонавушники)
+          </label>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="noise"> В: рожевий шум зі спалахами 0.3 с
+          </label>
+          <label class="flex items-center gap-3 text-sm text-zinc-200">
+            <input type="radio" name="hum-mode" value="tremolo"> Г: тремоло 8 Гц, гучність 10–100%
+          </label>
+        </fieldset>
         <button id="test-snore-btn" type="button"
                 class="mt-4 px-4 py-2 bg-zinc-800 text-zinc-200 rounded border border-zinc-700 disabled:opacity-40">
           🧪 Симулювати атаку хропіння
@@ -224,6 +242,21 @@ const ENGINE_CONFIG = Object.freeze({
   HUM_HZ: 350,
   HUM_MICRO_GAIN: 0.0001,
   HUM_END_GAIN: 0.88,
+  // Експериментальні режими гулу: А — хаотичне плавання частоти; Б — бінауральні ритми; В — рожевий шум зі спалахами; Г — тремоло
+  JITTER_MIN_HZ: 320,
+  JITTER_MAX_HZ: 380,
+  JITTER_STEP_S: 1,
+  BINAURAL_LEFT_HZ: 350,
+  BINAURAL_RIGHT_HZ: 355,
+  NOISE_BUFFER_S: 2,
+  NOISE_BOOST: 2,
+  NOISE_BURST_INTERVAL_S: 0.3,
+  NOISE_BURST_ATTACK_S: 0.005,
+  NOISE_BURST_DECAY_S: 0.12,
+  TREMOLO_HZ: 8,
+  TREMOLO_MIN_GAIN: 0.1,
+  TREMOLO_MAX_GAIN: 1,
+  RELEASE_TAIL_FACTOR: 5,
   PULSE_HZ: 4,
   PULSE_DEPTH: 0.3,
   PULSE_BASE: 0.7,
@@ -410,28 +443,147 @@ function scheduleClicks(context, destination, t0) {
   osc.stop(t0 + stage1S);
 }
 
-function scheduleHum(context, destination, t0) {
+/* ---------- Режими синтезу гулу (вибір радіокнопками на вкладці «Ніч») ---------- */
+
+const HUM_MODES = Object.freeze(['base', 'jitter', 'binaural', 'noise', 'tremolo']);
+let selectedHumMode = 'base';
+
+function setHumMode(mode) {
+  if (HUM_MODES.includes(mode)) selectedHumMode = mode;
+}
+
+function createTriangle(context, hz, t1, sources) {
+  const osc = context.createOscillator();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(hz, t1);
+  osc.start(t1);
+  sources.push(osc);
+  return osc;
+}
+
+// Низькочастотна пульсація амплітуди PULSE_HZ: множить вхідний сигнал на PULSE_BASE ± PULSE_DEPTH
+function withPulse(context, input, t1, sources) {
   const C = ENGINE_CONFIG;
-  const t1 = t0 + C.STAGE1_MS / 1000;
-  const tEnd = t0 + C.ATTACK_RAMP_S;
-  const hum = context.createOscillator();
-  const humGain = context.createGain();
   const pulse = context.createGain();
   const lfo = context.createOscillator();
   const lfoDepth = context.createGain();
-  hum.type = 'triangle';
-  hum.frequency.setValueAtTime(C.HUM_HZ, t1);
-  humGain.gain.setValueAtTime(C.HUM_MICRO_GAIN, t1);
-  humGain.gain.linearRampToValueAtTime(C.HUM_END_GAIN, tEnd);
   pulse.gain.value = C.PULSE_BASE;
   lfo.type = 'sine';
   lfo.frequency.value = C.PULSE_HZ;
   lfoDepth.gain.value = C.PULSE_DEPTH;
   lfo.connect(lfoDepth).connect(pulse.gain);
-  hum.connect(humGain).connect(pulse).connect(destination);
-  hum.start(t1);
   lfo.start(t1);
-  return { hum, lfo };
+  sources.push(lfo);
+  input.connect(pulse);
+  return pulse;
+}
+
+// Режим А: частота щосекунди пливе до нового випадкового значення, тож підсвідомість не звикає до тону
+function buildJitterHum(context, t1, sources) {
+  const C = ENGINE_CONFIG;
+  const osc = createTriangle(context, C.HUM_HZ, t1, sources);
+  const steps = Math.ceil(C.ATTACK_MAX_MS / 1000 / C.JITTER_STEP_S) + 1;
+  for (let step = 1; step <= steps; step += 1) {
+    const hz = C.JITTER_MIN_HZ + Math.random() * (C.JITTER_MAX_HZ - C.JITTER_MIN_HZ);
+    osc.frequency.linearRampToValueAtTime(hz, t1 + step * C.JITTER_STEP_S);
+  }
+  return withPulse(context, osc, t1, sources);
+}
+
+// Режим Б: у ліве вухо 350 Гц, у праве 355 Гц; різницю в 5 Гц мозок формує сам (потрібні стереонавушники)
+function buildBinauralHum(context, t1, sources) {
+  const C = ENGINE_CONFIG;
+  const merger = context.createChannelMerger(2);
+  createTriangle(context, C.BINAURAL_LEFT_HZ, t1, sources).connect(merger, 0, 0);
+  createTriangle(context, C.BINAURAL_RIGHT_HZ, t1, sources).connect(merger, 0, 1);
+  return merger;
+}
+
+// Рожевий шум (алгоритм Пола Келлета): рівна енергія на октаву, м'якший за білий
+function createPinkNoiseBuffer(context) {
+  const C = ENGINE_CONFIG;
+  const buffer = context.createBuffer(1, Math.round(context.sampleRate * C.NOISE_BUFFER_S), context.sampleRate);
+  const data = buffer.getChannelData(0);
+  let b0 = 0;
+  let b1 = 0;
+  let b2 = 0;
+  let b3 = 0;
+  let b4 = 0;
+  let b5 = 0;
+  let b6 = 0;
+  for (let i = 0; i < data.length; i += 1) {
+    const white = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + white * 0.0555179;
+    b1 = 0.99332 * b1 + white * 0.0750759;
+    b2 = 0.969 * b2 + white * 0.153852;
+    b3 = 0.8665 * b3 + white * 0.3104856;
+    b4 = 0.55 * b4 + white * 0.5329522;
+    b5 = -0.7616 * b5 - white * 0.016898;
+    data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11 * C.NOISE_BOOST;
+    b6 = white * 0.115926;
+  }
+  return buffer;
+}
+
+// Режим В: рожевий шум із різкими спалахами кожні NOISE_BURST_INTERVAL_S (шурхіт, тріск)
+function buildNoiseBurstHum(context, t1, sources) {
+  const C = ENGINE_CONFIG;
+  const noise = context.createBufferSource();
+  noise.buffer = createPinkNoiseBuffer(context);
+  noise.loop = true;
+  noise.start(t1);
+  sources.push(noise);
+  const bursts = context.createGain();
+  bursts.gain.setValueAtTime(0, t1);
+  const count = Math.ceil(C.ATTACK_MAX_MS / 1000 / C.NOISE_BURST_INTERVAL_S) + 1;
+  for (let k = 0; k < count; k += 1) {
+    const at = t1 + k * C.NOISE_BURST_INTERVAL_S;
+    bursts.gain.setValueAtTime(0, at);
+    bursts.gain.linearRampToValueAtTime(1, at + C.NOISE_BURST_ATTACK_S);
+    bursts.gain.linearRampToValueAtTime(0, at + C.NOISE_BURST_ATTACK_S + C.NOISE_BURST_DECAY_S);
+  }
+  noise.connect(bursts);
+  return bursts;
+}
+
+// Режим Г: гучність циклічно ходить між TREMOLO_MIN_GAIN і TREMOLO_MAX_GAIN із частотою TREMOLO_HZ
+function buildTremoloHum(context, t1, sources) {
+  const C = ENGINE_CONFIG;
+  const osc = createTriangle(context, C.HUM_HZ, t1, sources);
+  const tremolo = context.createGain();
+  const lfo = context.createOscillator();
+  const lfoDepth = context.createGain();
+  tremolo.gain.value = (C.TREMOLO_MAX_GAIN + C.TREMOLO_MIN_GAIN) / 2;
+  lfo.type = 'sine';
+  lfo.frequency.value = C.TREMOLO_HZ;
+  lfoDepth.gain.value = (C.TREMOLO_MAX_GAIN - C.TREMOLO_MIN_GAIN) / 2;
+  lfo.connect(lfoDepth).connect(tremolo.gain);
+  lfo.start(t1);
+  sources.push(lfo);
+  osc.connect(tremolo);
+  return tremolo;
+}
+
+const HUM_BUILDERS = Object.freeze({
+  base: (context, t1, sources) => withPulse(context, createTriangle(context, ENGINE_CONFIG.HUM_HZ, t1, sources), t1, sources),
+  jitter: buildJitterHum,
+  binaural: buildBinauralHum,
+  noise: buildNoiseBurstHum,
+  tremolo: buildTremoloHum
+});
+
+// Усі режими проходять через спільну обвідку розгону humGain і далі через destination (master-gain), тож Mute їх глушить
+function scheduleHum(context, destination, t0) {
+  const C = ENGINE_CONFIG;
+  const t1 = t0 + C.STAGE1_MS / 1000;
+  const tEnd = t0 + C.ATTACK_RAMP_S;
+  const sources = [];
+  const humGain = context.createGain();
+  humGain.gain.setValueAtTime(C.HUM_MICRO_GAIN, t1);
+  humGain.gain.linearRampToValueAtTime(C.HUM_END_GAIN, tEnd);
+  HUM_BUILDERS[selectedHumMode](context, t1, sources).connect(humGain);
+  humGain.connect(destination);
+  return { stop: (when) => sources.forEach((source) => source.stop(when)) };
 }
 
 // Запускає повну атаку; stop() плавно гасить звук (гул тримається на піку, доки його не зупинено)
@@ -440,15 +592,15 @@ function startAttack(context, destination) {
   const out = context.createGain();
   out.connect(destination);
   scheduleClicks(context, out, t0);
-  const { hum, lfo } = scheduleHum(context, out, t0);
+  const hum = scheduleHum(context, out, t0);
   return {
     stop() {
+      const C = ENGINE_CONFIG;
       const t = context.currentTime;
       out.gain.cancelScheduledValues(t);
       out.gain.setValueAtTime(out.gain.value, t);
-      out.gain.setTargetAtTime(0, t, ENGINE_CONFIG.RELEASE_S);
-      hum.stop(t + 1);
-      lfo.stop(t + 1);
+      out.gain.setTargetAtTime(0, t, C.RELEASE_S);
+      hum.stop(t + C.RELEASE_S * C.RELEASE_TAIL_FACTOR);
     }
   };
 }
@@ -872,6 +1024,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   const MASK_SHIFT_MS = 60000;
   const MAX_STORED_SESSIONS = 200;
   const EVENTS_KEY = 'vio.events';
+  const HUM_MODE_KEY = 'vio.humMode';
   const MAX_STORED_EVENTS = 200;
   const MAX_MIC_RESTARTS = 3;
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
@@ -1471,9 +1624,42 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     return li;
   }
 
+  /* ---------- Режим сигналу ---------- */
+
+  function readHumMode() {
+    try {
+      return localStorage.getItem(HUM_MODE_KEY);
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати режим сигналу', err);
+      return null;
+    }
+  }
+
+  function saveHumMode(mode) {
+    try {
+      localStorage.setItem(HUM_MODE_KEY, mode);
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти режим сигналу', err);
+    }
+  }
+
+  function initHumMode() {
+    const radios = document.querySelectorAll('input[name="hum-mode"]');
+    const saved = readHumMode();
+    radios.forEach((radio) => {
+      if (radio.value === saved) radio.checked = true;
+      if (radio.checked) setHumMode(radio.value);
+      radio.addEventListener('change', () => {
+        setHumMode(radio.value);
+        saveHumMode(radio.value);
+      });
+    });
+  }
+
   /* ---------- Ініціалізація ---------- */
 
   function init() {
+    initHumMode();
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => setTab(btn.dataset.tab));
     });
