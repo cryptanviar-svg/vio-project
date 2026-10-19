@@ -38,3 +38,7 @@ calibration/
 
 # Набір зразків ESC-50 для tools/replay (CC BY-NC, не комітиться)
 tools/samples/
+
+# APK і резервні копії збірок
+*.apk
+backups/

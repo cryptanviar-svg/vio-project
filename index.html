@@ -254,13 +254,10 @@ const ENGINE_CONFIG = Object.freeze({
   ENVELOPE_SMOOTHING: 0.7,
   CALIBRATION_MS: 3000,
   // Гібридний протокол. Енергозбереження: нейромережа спить, поки RMS не вищий за AI_WAKE_RMS; засинає після AI_SLEEP_DELAY_MS нижче AI_SLEEP_RMS.
-  // Тригер: клас Snoring понад AI_SNORE_MIN_SCORE АБО будь-який звук з RMS понад LOUD_RMS довше LOUD_HOLD_MS.
   // Антиглушіння: епізод закінчується лише після EPISODE_GAP_MS безперервної відсутності тригерів
   AI_WAKE_RMS: 0.002,
   AI_SLEEP_RMS: 0.0015,
   AI_SLEEP_DELAY_MS: 4000,
-  LOUD_RMS: 0.015,
-  LOUD_HOLD_MS: 2000,
   EPISODE_GAP_MS: 5000,
   ATTACK_MAX_MS: 30000,
   LOCKOUT_MS: 10000,
@@ -848,7 +845,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     } catch (err) {
       console.error('VIO: помилка класифікації YAMNet', err);
       ai.isReady = false;
-      onLog('YAMNet дав збій — працюють лише тригери за гучністю');
+      onLog('YAMNet дав збій — хропіння не виявляється (гучність рефлекс не запускає)');
     } finally {
       ai.isBusy = false;
     }
@@ -877,11 +874,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         : 'YAMNet завантажено: хропіння визначає нейромережа (клас Snoring)');
     } catch (err) {
       console.error('VIO: YAMNet недоступний', err);
-      onLog('YAMNet недоступний — працюють лише тригери за гучністю');
+      onLog('YAMNet недоступний — хропіння не виявляється (гучність рефлекс не запускає)');
     }
   }
 
-  // Тригер: клас Snoring (свіжий вердикт ШІ) АБО гучність понад LOUD_RMS довше LOUD_HOLD_MS; Рефлекс стартує одразу, без правила про сплески
   function trackTriggers(now, rms) {
     const reason = VioCore.evaluateTriggers(st, C, now, rms);
     if (reason) startEpisode(now, reason);
@@ -1050,7 +1046,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     master = out;
     buffer = new Float32Array(node.fftSize);
     st = {
-      startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
+      startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, isActive: false, episode: null,
       ai: VioCore.createAiState(),
       silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
