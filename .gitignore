@@ -34,3 +34,4 @@ ecc/
 # Нативна збірка Android (Capacitor)
 /www/
 /android/
+calibration/

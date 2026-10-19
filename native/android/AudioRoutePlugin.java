@@ -2,14 +2,19 @@ package com.vio.app;
 
 import android.Manifest;
 import android.content.BroadcastReceiver;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.os.SystemClock;
+import android.provider.MediaStore;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
@@ -18,6 +23,9 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -115,6 +123,45 @@ public class AudioRoutePlugin extends Plugin {
             case AudioManager.MODE_RINGTONE: return "MODE_RINGTONE";
             default: return "режим " + mode;
         }
+    }
+
+    /* ---------- Збереження звіту ---------- */
+
+    // Пише текст у папку «Завантаження» через MediaStore (без додаткових дозволів, Android 10+)
+    @PluginMethod
+    public void saveReport(PluginCall call) {
+        String fileName = call.getString("fileName");
+        String content = call.getString("content");
+        String mimeType = call.getString("mimeType", "text/plain");
+        if (fileName == null || fileName.isEmpty() || content == null) {
+            call.reject("Немає імені файлу або вмісту звіту");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            call.reject("Збереження звіту потребує Android 10 або новішого");
+            return;
+        }
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName.replaceAll("[\\\\/]", "_"));
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+        ContentResolver resolver = getContext().getContentResolver();
+        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            call.reject("Система не створила файл у «Завантаженнях»");
+            return;
+        }
+        try (OutputStream out = resolver.openOutputStream(uri)) {
+            if (out == null) throw new IOException("не вдалося відкрити файл для запису");
+            out.write(content.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            resolver.delete(uri, null, null);
+            call.reject("Не вдалося записати звіт: " + e.getMessage());
+            return;
+        }
+        JSObject result = new JSObject();
+        result.put("path", Environment.DIRECTORY_DOWNLOADS + "/" + fileName);
+        call.resolve(result);
     }
 
     @PluginMethod

@@ -216,6 +216,10 @@
       <h2 class="pt-2 text-xs uppercase tracking-widest text-zinc-200">Журнал подій</h2>
       <ul id="log-list" class="space-y-1.5"></ul>
       <p id="log-empty" class="py-4 text-center text-sm text-zinc-300">Подій поки немає</p>
+      <button id="report-save" type="button"
+              class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-200 active:bg-zinc-900">
+        Зберегти звіт
+      </button>
       <button id="report-clear" type="button"
               class="w-full rounded-xl border border-zinc-800 py-3 text-sm text-zinc-300 active:bg-zinc-900">
         Очистити історію
@@ -302,7 +306,10 @@ const ENGINE_CONFIG = Object.freeze({
   AI_CAPTURE_BATCH: 8192,
   AI_CLASS_COUNT: 521,
   AI_SNORING_CLASS: 38,
-  AI_SNORE_MIN_SCORE: 0.4,
+  AI_SNORE_MIN_SCORE: 0.2,
+  // Підтвердження: щонайменше AI_CONFIRM_HITS секунд зі Snoring понад поріг протягом AI_CONFIRM_WINDOW_MS
+  AI_CONFIRM_HITS: 2,
+  AI_CONFIRM_WINDOW_MS: 8000,
   DIAG_TOP_CLASSES: 3,
   // Швидкий тригер: Snoring понад AI_FAST_SCORE разом із RMS понад AI_FAST_RMS AI_FAST_HITS класифікацій поспіль запускає Рефлекс одразу після останньої
   AI_FAST_SCORE: 0.25,
@@ -824,6 +831,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
     if (!isCalibrating && !ai.isAwake) {
       ai.isSnore = false;
+      ai.snoreHits = [];
       ai.fastHits = 0;
       ai.updatedAt = performance.now();
       return;
@@ -837,14 +845,21 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const isFastHit = snoring > C.AI_FAST_SCORE && session.lastRms > C.AI_FAST_RMS;
       ai.fastHits = isFastHit ? ai.fastHits + 1 : 0;
       const isFastConfirmed = ai.fastHits >= C.AI_FAST_HITS;
-      ai.isSnore = snoring > selectedSnoreThreshold || isFastConfirmed;
       ai.updatedAt = performance.now();
+      const isAboveThreshold = snoring > selectedSnoreThreshold;
+      ai.snoreHits = [...ai.snoreHits.filter((t) => ai.updatedAt - t < C.AI_CONFIRM_WINDOW_MS), ...(isAboveThreshold ? [ai.updatedAt] : [])];
+      const isScoreConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
+      const fastReason = `швидкий тригер: Snoring ${snoring.toFixed(2)} і RMS ${session.lastRms.toFixed(3)}, ${ai.fastHits} класифікації поспіль`;
+      ai.isSnore = isScoreConfirmed || isFastConfirmed;
+      ai.snoreReason = isScoreConfirmed
+        ? `підтвердження скором: Snoring ${snoring.toFixed(2)} вище порога ${selectedSnoreThreshold.toFixed(2)}, ${ai.snoreHits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с`
+        : fastReason;
       onSample({
         rms: session.lastRms, snoring, top: topClasses(scores, C.DIAG_TOP_CLASSES),
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
       if (isFastConfirmed && st === session && !session.episode && ai.updatedAt >= session.lockoutUntil) {
-        startEpisode(ai.updatedAt, 'швидкий тригер: Snoring і гучний звук');
+        startEpisode(ai.updatedAt, fastReason);
       }
     } catch (err) {
       console.error('VIO: помилка класифікації YAMNet', err);
@@ -895,7 +910,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const isForced = now < ai.forcedUntil;
     st.isActive = isSnoreHit || isLoudHit || isForced;
     if (!st.isActive || st.episode || now < st.lockoutUntil) return;
-    const reason = isSnoreHit ? 'клас Snoring' : isLoudHit ? `гучний звук понад ${C.LOUD_HOLD_MS / 1000} с` : 'інженерний тест';
+    const reason = isSnoreHit ? ai.snoreReason : isLoudHit
+      ? `гучний звук: RMS ${rms.toFixed(3)} понад ${C.LOUD_RMS} довше ${C.LOUD_HOLD_MS / 1000} с` : 'інженерний тест';
     startEpisode(now, reason);
   }
 
@@ -1076,7 +1092,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     st = {
       startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
       ai: {
-        isReady: false, isBusy: false, isSnore: false, fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
+        isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreHits: [], fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
       silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
@@ -1150,7 +1166,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   const STORAGE_KEY = 'vio.sessions';
   const MAX_LOG_ROWS = 50;
-  const MAX_SESSION_EVENTS = 500;
+  const MAX_SESSION_EVENTS = 5000;
   const MASK_IDLE_MS = 10000;
   const MASK_SHIFT_MS = 60000;
   const MAX_STORED_SESSIONS = 200;
@@ -1164,16 +1180,19 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const TEST_UPDATE_MS = 100;
   const TEST_REPORT_MS = 5000;
   const TEST_METER_FULL_RMS = 0.1;
-  const DIAG_MIN_RMS = 0.003;
-  const MAX_DIAG_ROWS = 300;
+  const DIAG_MIN_SNORING = 0.1;
+  const MAX_DIAG_ROWS = 4000;
+  const LIVE_SESSION_KEY = 'vio.liveSession';
+  const LIVE_SAVE_EVERY_S = 30;
+  const REPORT_MIME = 'text/plain';
   const CLASS_MAP_URL = './vendor/yamnet/yamnet_class_map.csv';
   const SNORE_THRESHOLD_KEY = 'vio.snoreThreshold';
   const CALIBRATION_TICK_MS = 250;
   const CALIBRATION_RAW_KEY = 'vio.calibrationRaw';
   const CALIBRATION_THRESHOLDS = Object.freeze([0.2, 0.3, 0.4]);
-  const CALIBRATION_MIN_RECALL = 0.8;
+  const CALIBRATION_NOISE_FACTOR = 2;
   const CALIBRATION_SCORED_KEYS = Object.freeze(['snoreOpen', 'snoreClosed', 'silence', 'speech']);
-  const CALIBRATION_MIN_THRESHOLD = 0.1;
+  const CALIBRATION_MIN_THRESHOLD = 0.05;
   const CALIBRATION_MIN_SAMPLES = 20;
   const CALIBRATION_STAGES = Object.freeze([
     { key: 'prep', label: 'Підготовка', seconds: 5, hint: 'Лежіть тихо: підключається мікрофон і нейромережа.' },
@@ -1255,13 +1274,55 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
   }
 
+  // Якщо сховище переповнене, відкидає найстаріші сесії, доки найновіші не поміщаються
   function saveSessions(list) {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(list.slice(-MAX_STORED_SESSIONS)));
-    } catch (err) {
-      console.error('VIO: не вдалося зберегти історію', err);
-      showAlert('Не вдалося зберегти сесію: сховище недоступне.');
+    const wanted = list.slice(-MAX_STORED_SESSIONS);
+    for (let dropped = 0; dropped < wanted.length; dropped++) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(wanted.slice(dropped)));
+        if (dropped > 0) showAlert(`Сховище переповнене: видалено найстаріші сесії (${dropped}).`);
+        return;
+      } catch (err) {
+        console.error('VIO: не вдалося зберегти історію', err);
+      }
     }
+    showAlert('Не вдалося зберегти сесію: сховище недоступне.');
+  }
+
+  function saveLiveSession() {
+    const s = state.session;
+    if (!s) return;
+    try {
+      localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify({
+        mode: s.mode, start: s.start, seconds: s.seconds, events: s.events, fallbacks: s.fallbacks
+      }));
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти поточну сесію', err);
+    }
+  }
+
+  function clearLiveSession() {
+    try {
+      localStorage.removeItem(LIVE_SESSION_KEY);
+    } catch (err) {
+      console.error('VIO: не вдалося очистити поточну сесію', err);
+    }
+  }
+
+  // Якщо застосунок закрили або вбила система посеред сесії, її звіт переходить в історію
+  function recoverLiveSession() {
+    let live = null;
+    try {
+      live = JSON.parse(localStorage.getItem(LIVE_SESSION_KEY) || 'null');
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати поточну сесію', err);
+    }
+    if (!live) return;
+    clearLiveSession();
+    if (!isValidSession({ ...live, endedBy: 'failsafe' })) return;
+    const session = normalizeSession({ ...live, endedBy: 'failsafe' });
+    session.events.push({ t: Date.now(), text: 'Застосунок закрито посеред сесії — звіт відновлено зі збереженого' });
+    saveSessions([...loadSessions(), session]);
   }
 
   function loadStandaloneEvents() {
@@ -1731,6 +1792,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     saveSessions([...loadSessions(), {
       mode: s.mode, start: s.start, seconds, endedBy, events: s.events, fallbacks: s.fallbacks
     }]);
+    clearLiveSession();
     disarmMask();
     renderSession();
     renderReports();
@@ -1740,6 +1802,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const s = state.session;
     if (!s) return;
     s.seconds = Math.round((Date.now() - s.start) / 1000);
+    if (s.seconds % LIVE_SAVE_EVERY_S === 0) saveLiveSession();
     renderSession();
   }
 
@@ -1854,6 +1917,57 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
     const ul = $('report-list');
     ul.replaceChildren(...[...list].reverse().map(buildReportRow));
+  }
+
+  function formatReportTime(t) {
+    return new Date(t).toLocaleString('uk-UA');
+  }
+
+  function buildReportText() {
+    const live = state.session ? [{ ...state.session, endedBy: 'live' }] : [];
+    const sessions = [...loadSessions(), ...live];
+    const lines = [`Звіт VIO, збережено ${formatReportTime(Date.now())}`, `Поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`, ''];
+    sessions.forEach((session) => {
+      const modeLabel = session.mode === 'night' ? 'Ніч' : 'День';
+      const endLabel = session.endedBy === 'user' ? 'зупинено користувачем' : session.endedBy === 'live' ? 'триває' : 'зупинено Fail-Safe';
+      lines.push(`=== ${modeLabel}, початок ${formatReportTime(session.start)}, тривалість ${formatDuration(session.seconds)}, ${endLabel} ===`);
+      session.events.forEach((event) => lines.push(`${new Date(event.t).toLocaleTimeString('uk-UA')} ${event.text}`));
+      lines.push('');
+    });
+    const standalone = loadStandaloneEvents();
+    if (standalone.length > 0) {
+      lines.push('=== Події поза сесією (тест мікрофона, калібрування) ===');
+      standalone.forEach((event) => lines.push(`${formatReportTime(event.t)} ${event.text}`));
+    }
+    return lines.join('\n');
+  }
+
+  function downloadInBrowser(fileName, content) {
+    const url = URL.createObjectURL(new Blob([content], { type: `${REPORT_MIME};charset=utf-8` }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function saveReport() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const fileName = `vio-report-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
+    const content = buildReportText();
+    try {
+      if (NativeAudioRoute) {
+        const result = await NativeAudioRoute.saveReport({ fileName, content, mimeType: REPORT_MIME });
+        addStandaloneEvent(`Звіт збережено: ${result.path}`);
+      } else {
+        downloadInBrowser(fileName, content);
+        addStandaloneEvent(`Звіт завантажено: ${fileName}`);
+      }
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти звіт', err);
+      showAlert(`Не вдалося зберегти звіт: ${err.message}`);
+    }
   }
 
   function buildLogRow(event) {
@@ -2073,7 +2187,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
   }
 
-  // Раз на секунду (коли звук гучніший за DIAG_MIN_RMS) пишемо в «Звіти», що чує нейромережа
+  // Раз на секунду (коли Snoring вищий за DIAG_MIN_SNORING) пишемо в «Звіти», що чує нейромережа
   function handleSample(sample) {
     const calibration = state.calibration;
     if (calibration) {
@@ -2082,7 +2196,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       logEvent(formatSample(sample, stage ? stage.label : ''));
       return;
     }
-    if (sample.rms <= DIAG_MIN_RMS) return;
+    if (sample.snoring <= DIAG_MIN_SNORING) return;
     const s = state.session;
     if (s) {
       if (s.diagRows >= MAX_DIAG_ROWS) return;
@@ -2104,25 +2218,38 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return { label, count, mean: averageOf(scores), max, shares, meanRms: averageOf(samples.map((sample) => sample.rms)) };
   }
 
-  // Поріг посередині між найвищим скором тиші/розмови й скором, який перевищують 80% секунд хропіння
-  function recommendThreshold(snore, others) {
-    if (snore.length < CALIBRATION_MIN_SAMPLES) {
-      return { value: null, reason: `Замало даних про хропіння (${snore.length} с): класифікація не встигала або мікрофон мовчав.` };
+  // Найвищий скор, який перевищують щонайменше AI_CONFIRM_HITS секунд у будь-якому вікні AI_CONFIRM_WINDOW_MS (як у підтвердженні двигуна)
+  function bestEpisodeScore(series) {
+    const windowSize = ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / ENGINE_CONFIG.AI_HOP_MS;
+    let best = 0;
+    for (const scores of series) {
+      for (let i = 0; i + windowSize <= scores.length; i++) {
+        const sorted = scores.slice(i, i + windowSize).sort((a, b) => b - a);
+        best = Math.max(best, sorted[ENGINE_CONFIG.AI_CONFIRM_HITS - 1]);
+      }
     }
-    const sorted = [...snore].sort((a, b) => a - b);
-    const high = sorted[Math.floor(sorted.length * (1 - CALIBRATION_MIN_RECALL))];
-    const noiseMax = others.length > 0 ? Math.max(...others) : 0;
-    const low = Math.max(noiseMax, CALIBRATION_MIN_THRESHOLD);
-    const value = Math.round(((low + high) / 2) * 1000) / 1000;
-    if (high <= low || value <= low || value >= high) {
+    return best;
+  }
+
+  // Поріг — найвищий, при якому епізод (≥2 с за 8 с) у хропінні ще перевищує його, і не менший за подвійний максимум тиші й розмови
+  function recommendThreshold(snoreSeries, noiseScores) {
+    const snoreCount = snoreSeries.reduce((sum, scores) => sum + scores.length, 0);
+    if (snoreCount < CALIBRATION_MIN_SAMPLES) {
+      return { value: null, reason: `Замало даних про хропіння (${snoreCount} с): класифікація не встигала або мікрофон мовчав.` };
+    }
+    const best = bestEpisodeScore(snoreSeries);
+    const value = Math.floor(best * 100) / 100 < best ? Math.floor(best * 100) / 100 : Math.round((best - 0.01) * 100) / 100;
+    const noiseMax = noiseScores.length > 0 ? Math.max(...noiseScores) : 0;
+    const floor = Math.max(noiseMax * CALIBRATION_NOISE_FACTOR, CALIBRATION_MIN_THRESHOLD);
+    if (value < floor) {
       return {
         value: null,
-        reason: `Поріг не підібрано: 80% хропіння мають скор вище ${high.toFixed(3)}, а тиша чи розмова сягали ${noiseMax.toFixed(3)}.`
+        reason: `Поріг не підібрано: епізоди хропіння (≥${ENGINE_CONFIG.AI_CONFIRM_HITS} с за ${ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / 1000} с) сягають лише ${best.toFixed(3)}, а потрібно не менше ${floor.toFixed(3)} (двічі максимум тиші й розмови ${noiseMax.toFixed(3)}, мінімум ${CALIBRATION_MIN_THRESHOLD}).`
       };
     }
     return {
       value,
-      reason: `Хропіння вище порога ≥ ${CALIBRATION_MIN_RECALL * 100}% секунд; тиша й розмова не перевищили ${noiseMax.toFixed(3)}.`
+      reason: `Епізоди хропіння (≥${ENGINE_CONFIG.AI_CONFIRM_HITS} с за ${ENGINE_CONFIG.AI_CONFIRM_WINDOW_MS / 1000} с) сягають ${best.toFixed(3)}; максимум тиші й розмови ${noiseMax.toFixed(3)}.`
     };
   }
 
@@ -2151,9 +2278,9 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function showCalibrationResults(scores) {
     const labelOf = (key) => CALIBRATION_STAGES.find((stage) => stage.key === key).label;
     const stages = CALIBRATION_SCORED_KEYS.map((key) => summarizeStage(labelOf(key), scores[key]));
-    const snoreScores = [...scores.snoreOpen, ...scores.snoreClosed].map((sample) => sample.snoring);
+    const snoreSeries = [scores.snoreOpen, scores.snoreClosed].map((samples) => samples.map((sample) => sample.snoring));
     const noiseScores = [...scores.silence, ...scores.speech].map((sample) => sample.snoring);
-    const advice = recommendThreshold(snoreScores, noiseScores);
+    const advice = recommendThreshold(snoreSeries, noiseScores);
     renderCalibrationTable(stages);
     state.calibrationResult = advice.value;
     const current = `Поточний поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`;
@@ -2337,6 +2464,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   /* ---------- Ініціалізація ---------- */
 
   function init() {
+    recoverLiveSession();
     initHumMode();
     initSnoreThreshold();
     document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -2366,6 +2494,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         VioAudio.unlock();
       }
     });
+    $('report-save').addEventListener('click', saveReport);
     $('report-clear').addEventListener('click', () => {
       if (window.confirm('Видалити всю історію сесій?')) {
         saveSessions([]);
