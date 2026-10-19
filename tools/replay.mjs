@@ -13,9 +13,8 @@ const SAMPLES_DIR = 'tools/samples';
 const POSITIVE_CLASS = 'snoring';
 const NEGATIVE_CLASSES = ['breathing', 'coughing', 'sneezing', 'mouse_click', 'keyboard_typing', 'door_wood_knock', 'dog', 'vacuum_cleaner', 'clock_tick'];
 const RULES = Object.freeze([
-  { name: 'А: 2 с вище 0.20 за 30 с', hits: 2, windowMs: 30000, single: 0 },
-  { name: 'Б: А або одна секунда ≥ 0.50', hits: 2, windowMs: 30000, single: 0.5 },
-  { name: 'В: А або одна секунда ≥ 0.70', hits: 2, windowMs: 30000, single: 0.7 }
+  { name: 'Нове: 2 с вище 0.20 за 30 с або одна ≥ 0.70, із забороною Speech', hits: 2, windowMs: 30000, single: 0.7, isSpeechBanned: true },
+  { name: 'Для порівняння: те саме без заборони Speech', hits: 2, windowMs: 30000, single: 0.7, isSpeechBanned: false }
 ]);
 const CURRENT_RULE_INDEX = 0;
 const PAIR_GAP_S = 12;
@@ -161,6 +160,7 @@ async function buildTrace(signal, env, cache) {
       const scores = cache.get(key);
       tick.isScored = true;
       tick.snoring = scores[C.AI_SNORING_CLASS];
+      tick.speech = scores[C.AI_SPEECH_CLASS];
       tick.top = topClasses(scores, C.DIAG_TOP_CLASSES);
     }
     tick.isFull = aiBuffer.isFull();
@@ -184,17 +184,18 @@ function kindOf(reason) {
 }
 
 function simulateRule(trace, env, rule) {
-  const C = { ...env.C, AI_CONFIRM_HITS: rule.hits, AI_CONFIRM_WINDOW_MS: rule.windowMs, AI_SINGLE_SCORE: rule.single };
+  const C = { ...env.C, AI_CONFIRM_HITS: rule.hits, AI_CONFIRM_WINDOW_MS: rule.windowMs, AI_SINGLE_SCORE: rule.single,
+    ...(rule.isSpeechBanned ? {} : { AI_SPEECH_MIN_SCORE: Infinity, AI_SPEECH_TOP_RANK: 0 }) };
   const ai = Core.createAiState();
   ai.isReady = true;
-  const st = { ai, episode: null, lockoutUntil: 0, loudSince: null, isActive: false };
+  const st = { ai, episode: null, lockoutUntil: 0, isActive: false };
   for (const tick of trace) {
     const now = tick.t * 1000;
     if (tick.isFull && !tick.isScored) {
       Core.idleScore(ai, C, now);
     } else if (tick.isScored) {
       const verdict = Core.registerScore(ai, C, {
-        now, wall: FAKE_DAY_START_MS + now, snoring: tick.snoring, rms: tick.lastRms, top: tick.top,
+        now, wall: FAKE_DAY_START_MS + now, snoring: tick.snoring, speech: tick.speech, rms: tick.lastRms, top: tick.top,
         threshold: env.threshold, classLabel: env.classLabel
       });
       if (verdict.isFastConfirmed && Core.canStartEpisode(st, now)) return { seconds: tick.t, kind: 'fast', reason: verdict.fastReason };
@@ -222,7 +223,8 @@ async function runTrial(label, category, signal, env, cache) {
   const trace = await buildTrace(signal, env, cache);
   const summary = summarizeTrace(trace, env.classLabel);
   const rules = RULES.map((rule) => simulateRule(trace, env, rule));
-  return { label, category, ...summary, rules };
+  const speechSeconds = trace.filter((tick) => tick.isScored && tick.snoring > env.C.AI_HOLD_SCORE && Core.isSpeechSecond(env.C, tick.speech, tick.top)).length;
+  return { label, category, ...summary, rules, speechSeconds };
 }
 
 function listFiles(category) {
@@ -245,35 +247,32 @@ function describeRuleResult(result) {
 
 function formatFileRow(trial) {
   const current = trial.rules[CURRENT_RULE_INDEX];
-  const others = RULES.map((rule, i) => `${rule.name}: ${describeRuleResult(trial.rules[i])}`).join('; ');
+  const others = RULES.map((rule, i) => `правило ${i + 1}: ${describeRuleResult(trial.rules[i])}`).join('; ');
   return `${trial.category.padEnd(16)} ${trial.label.padEnd(20)} макс Snoring ${trial.maxSnoring.toFixed(2)} | рефлекс ${current ? `так, через ${current.seconds} с, ${current.kind}` : 'ні'} | топ-3: ${trial.top3} | ${others}`;
 }
 
-// Рефлекс за моделлю (скор або швидкий тригер) окремо від тригера за гучністю: гучність від правила не залежить
 function countOutcomes(trials, ruleIndex) {
-  const hit = trials.filter((trial) => trial.rules[ruleIndex]);
-  return {
-    total: trials.length,
-    any: hit.length,
-    model: hit.filter((trial) => trial.rules[ruleIndex].kind !== 'loud').length,
-    loud: hit.filter((trial) => trial.rules[ruleIndex].kind === 'loud').length
-  };
+  return { total: trials.length, any: trials.filter((trial) => trial.rules[ruleIndex]).length };
 }
 
 function summaryLines(title, positives, negatives, negativeClasses) {
-  const lines = [`\n=== ${title} ===`];
+  const lines = [`
+=== ${title} ===`];
   RULES.forEach((rule, i) => {
     const pos = countOutcomes(positives, i);
     const neg = countOutcomes(negatives, i);
-    lines.push(`Правило ${rule.name}${i === CURRENT_RULE_INDEX ? ' (поточне)' : ''}:`);
-    lines.push(`  хропіння: рефлекс у ${pos.any} з ${pos.total} (${percent(pos.any, pos.total)}), з них за моделлю ${pos.model}, за гучністю ${pos.loud}`);
-    lines.push(`  негативи: хибних спрацювань ${neg.any} з ${neg.total} (${percent(neg.any, neg.total)}), з них за моделлю ${neg.model}, за гучністю ${neg.loud}`);
+    lines.push(`${rule.name}:`);
+    lines.push(`  хропіння: рефлекс у ${pos.any} з ${pos.total} (${percent(pos.any, pos.total)})`);
+    lines.push(`  негативи: хибних спрацювань ${neg.any} з ${neg.total} (${percent(neg.any, neg.total)})`);
     const perClass = negativeClasses.map((name) => {
       const c = countOutcomes(negatives.filter((trial) => trial.category === name), i);
-      return `${name} ${c.any}/${c.total} (модель ${c.model})`;
+      return `${name} ${c.any}/${c.total}`;
     });
     lines.push(`  по класах: ${perClass.join('; ')}`);
   });
+  const blockedPositives = positives.filter((trial) => trial.speechSeconds > 0).length;
+  const blockedNegatives = negatives.filter((trial) => trial.speechSeconds > 0).length;
+  lines.push(`Заборона Speech відсіяла секунди зі Snoring > 0.10: у ${blockedPositives} з ${positives.length} зразків хропіння, у ${blockedNegatives} з ${negatives.length} негативів`);
   return lines;
 }
 
@@ -309,7 +308,7 @@ async function main() {
   });
   const lines = [
     `Поріг Snoring ${env.threshold}, утримання сигналу ${env.C.AI_HOLD_QUIET_MS / 1000} с без Snoring понад ${env.C.AI_HOLD_SCORE}.`,
-    `Гучність (LOUD_RMS ${env.C.LOUD_RMS} довше ${env.C.LOUD_HOLD_MS / 1000} с) теж запускає рефлекс, тому хибні спрацювання поділено на «за моделлю» і «за гучністю».`,
+    'Гучність сама рефлекс не запускає: лише правила за моделлю.',
     '\n=== Окремі файли (5 с), поточне правило і порівняння правил ===',
     ...singles.map(formatFileRow),
     ...summaryLines('Підсумок: окремі файли по 5 с', split(singles).positives, split(singles).negatives, NEGATIVE_CLASSES),

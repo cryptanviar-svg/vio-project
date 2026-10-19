@@ -90,10 +90,18 @@
     ai.fastHits = 0;
   }
 
+  // Розмова: Speech від AI_SPEECH_MIN_SCORE або Speech серед AI_SPEECH_TOP_RANK найвищих класів
+  function isSpeechSecond(C, speech, top) {
+    return speech >= C.AI_SPEECH_MIN_SCORE || top.slice(0, C.AI_SPEECH_TOP_RANK).some((item) => item.index === C.AI_SPEECH_CLASS);
+  }
+
   // Одна класифікація (раз на секунду): оновлює підтвердження за скором, швидкий тригер і утримання сигналу.
-  // input: { now, wall, snoring, rms, top, threshold, classLabel }; повертає { isFastConfirmed, fastReason }
+  // input: { now, wall, snoring, speech, rms, top, threshold, classLabel }; повертає { isFastConfirmed, fastReason, isSpeechBlocked }.
+  // Секунда з розмовою не враховується в жодному правилі (скор Snoring для неї вважається нульовим) і не продовжує утримання сигналу
   function registerScore(ai, C, input) {
-    const { now, wall, snoring, rms, top, threshold, classLabel } = input;
+    const { now, wall, speech, rms, top, threshold, classLabel } = input;
+    const isSpeech = isSpeechSecond(C, speech, top);
+    const snoring = isSpeech ? 0 : input.snoring;
     const isFastHit = snoring > C.AI_FAST_SCORE && rms > C.AI_FAST_RMS;
     ai.fastHits = isFastHit ? ai.fastHits + 1 : 0;
     const isFastConfirmed = ai.fastHits >= C.AI_FAST_HITS;
@@ -116,31 +124,24 @@
     } else if (isFastConfirmed) {
       ai.snoreReason = fastReason;
     }
-    return { isFastConfirmed, fastReason };
+    return { isFastConfirmed, fastReason, isSpeechBlocked: isSpeech && input.snoring > C.AI_HOLD_SCORE };
   }
 
   function canStartEpisode(st, now) {
     return !st.episode && now >= st.lockoutUntil;
   }
 
-  // Тригер: клас Snoring (свіжий вердикт ШІ) АБО гучність понад LOUD_RMS довше LOUD_HOLD_MS.
+  // Тригер: лише клас Snoring (свіжий вердикт ШІ) за правилами моделі; гучність сама рефлекс не запускає.
   // Повертає причину, якщо треба стартувати епізод (Рефлекс 1), інакше null
   function evaluateTriggers(st, C, now, rms) {
     const ai = st.ai;
     const isSnoreHit = ai.isReady && now - ai.updatedAt < C.AI_STALE_MS && ai.isSnore;
-    if (rms > C.LOUD_RMS) {
-      if (st.loudSince === null) st.loudSince = now;
-    } else {
-      st.loudSince = null;
-    }
-    const isLoudHit = st.loudSince !== null && now - st.loudSince >= C.LOUD_HOLD_MS;
     const isForced = now < ai.forcedUntil;
-    st.isActive = isSnoreHit || isLoudHit || isForced;
+    st.isActive = isSnoreHit || isForced;
     if (!st.isActive || !canStartEpisode(st, now)) return null;
     if (isSnoreHit) return ai.snoreReason;
-    if (isLoudHit) return `причина: гучність — гучний звук: RMS ${rms.toFixed(3)} понад ${C.LOUD_RMS} довше ${C.LOUD_HOLD_MS / 1000} с`;
     return 'інженерний тест';
   }
 
-  return { createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
+  return { isSpeechSecond, createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
 });

@@ -313,6 +313,10 @@ const ENGINE_CONFIG = Object.freeze({
   AI_CONFIRM_WINDOW_MS: 30000,
   // Або одна секунда зі Snoring від AI_SINGLE_SCORE (0 вимикає): правило В із порівняння в tools/replay
   AI_SINGLE_SCORE: 0.7,
+  // Розмова не вважається хропінням: секунда зі Speech від AI_SPEECH_MIN_SCORE (або Speech у топ-AI_SPEECH_TOP_RANK) не враховується в жодному правилі
+  AI_SPEECH_CLASS: 0,
+  AI_SPEECH_MIN_SCORE: 0.5,
+  AI_SPEECH_TOP_RANK: 2,
   // Після спрацювання сигнал тримається, доки не мине AI_HOLD_QUIET_MS без жодної секунди зі Snoring понад AI_HOLD_SCORE
   AI_HOLD_SCORE: 0.1,
   AI_HOLD_QUIET_MS: 10000,
@@ -826,10 +830,14 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       samples.fill(0);
       const snoring = scores[C.AI_SNORING_CLASS];
       const top = topClasses(scores, C.DIAG_TOP_CLASSES);
-      const { isFastConfirmed, fastReason } = VioCore.registerScore(ai, C, {
-        now: performance.now(), wall: Date.now(), snoring, rms: session.lastRms, top,
+      const speech = scores[C.AI_SPEECH_CLASS];
+      const { isFastConfirmed, fastReason, isSpeechBlocked } = VioCore.registerScore(ai, C, {
+        now: performance.now(), wall: Date.now(), snoring, speech, rms: session.lastRms, top,
         threshold: selectedSnoreThreshold, classLabel
       });
+      if (isSpeechBlocked && !isCalibrating) {
+        onLog(`Розмову відсіяно: Speech ${speech.toFixed(2)}, Snoring ${snoring.toFixed(2)} — секунду не враховано`);
+      }
       onSample({
         rms: session.lastRms, snoring, top,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
