@@ -1220,6 +1220,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     isWakeLockPending: false,
     isWakeLockWarned: false,
     isStarting: false,
+    pendingEvents: [],
     calibration: null,
     isCalibrationStarting: false,
     isRestarting: false,
@@ -1783,6 +1784,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       addStandaloneEvent(text);
       return;
     }
+    // Рядки старту (гарнітура, профіль, частоти) з'являються до створення сесії: тримаємо їх і переносимо в журнал сесії
+    if (!s && state.isStarting) {
+      state.pendingEvents.push({ t: Date.now(), text });
+      return;
+    }
     if (!s || s.events.length >= MAX_SESSION_EVENTS) return;
     s.events.push({ t: Date.now(), text });
   }
@@ -2010,14 +2016,18 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         stopBackgroundService();
         releaseHeadsetMic();
         showAlert(err.message);
+        saveStandaloneEvents([...loadStandaloneEvents(), ...state.pendingEvents]);
+        state.pendingEvents = [];
         return;
       } finally {
         state.isStarting = false;
       }
       state.engine = engine;
     }
+    const startEvents = state.pendingEvents;
+    state.pendingEvents = [];
     state.session = {
-      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isWaitingHeadset: false, diagRows: 0
+      mode, start: Date.now(), seconds: 0, status: '', events: startEvents, fallbacks: 0, isWaitingHeadset: false, diagRows: 0
     };
     logEvent(mode === 'night' ? 'Нічну сесію розпочато (вихід: Bluetooth-гарнітура)' : 'Денну сесію розпочато');
     state.tickId = setInterval(tick, 1000);
