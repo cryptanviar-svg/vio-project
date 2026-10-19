@@ -248,10 +248,11 @@ const ENGINE_CONFIG = Object.freeze({
   ANALYSIS_INTERVAL_MS: 1000,
   ENVELOPE_SMOOTHING: 0.7,
   CALIBRATION_MS: 3000,
-  // Гібридний протокол. Енергозбереження: нейромережа спить, поки RMS не вищий за AI_WAKE_RMS.
+  // Гібридний протокол. Енергозбереження: нейромережа спить, поки RMS не вищий за AI_WAKE_RMS; засинає після AI_SLEEP_DELAY_MS нижче AI_SLEEP_RMS.
   // Тригер: клас Snoring понад AI_SNORE_MIN_SCORE АБО будь-який звук з RMS понад LOUD_RMS довше LOUD_HOLD_MS.
   // Антиглушіння: епізод закінчується лише після EPISODE_GAP_MS безперервної відсутності тригерів
-  AI_WAKE_RMS: 0.005,
+  AI_WAKE_RMS: 0.002,
+  AI_SLEEP_RMS: 0.0015,
   AI_SLEEP_DELAY_MS: 4000,
   LOUD_RMS: 0.015,
   LOUD_HOLD_MS: 2000,
@@ -813,16 +814,15 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return window;
   }
 
-  // Нейромережа спить, поки в кімнаті тихо (RMS не вищий за AI_WAKE_RMS): model.predict не викликається і CPU не навантажується.
-  // Засинає вона лише через AI_SLEEP_DELAY_MS після останнього гучного звуку, щоб паузи між вдихами не обривали аналіз
+  // Нейромережа спить, поки в кімнаті тихо: model.predict не викликається і CPU не навантажується.
+  // Прокидається при RMS понад AI_WAKE_RMS, а засинає лише після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS (гістерезис), щоб паузи між вдихами не обривали аналіз
   async function classify() {
     const session = st;
     const ai = session.ai;
     const now = performance.now();
     if (now < ai.forcedUntil) return;
     if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
-    const isGraceOver = ai.lastLoudAt === null || now - ai.lastLoudAt > C.AI_SLEEP_DELAY_MS;
-    if (!isCalibrating && session.env <= C.AI_WAKE_RMS && isGraceOver) {
+    if (!isCalibrating && !ai.isAwake) {
       ai.isSnore = false;
       ai.fastHits = 0;
       ai.updatedAt = performance.now();
@@ -960,6 +960,32 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     onLog(`Мікрофон (${stage}): AudioContext=${ctx ? ctx.state : 'немає'}, ${trackInfo}`);
   }
 
+  // Гістерезис нейромережі: прокидання при env > AI_WAKE_RMS, засинання після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS
+  function updateAiWakefulness(now) {
+    const ai = st.ai;
+    if (st.env > C.AI_WAKE_RMS) {
+      ai.isAwake = true;
+      ai.belowSince = null;
+      return;
+    }
+    if (st.env >= C.AI_SLEEP_RMS) {
+      ai.belowSince = null;
+      return;
+    }
+    if (ai.belowSince === null) ai.belowSince = now;
+    if (ai.isAwake && now - ai.belowSince > C.AI_SLEEP_DELAY_MS) ai.isAwake = false;
+  }
+
+  // Частоти дискретизації: контекст, доріжка мікрофона й чи знижується звук до частоти YAMNet
+  function logSampleRates() {
+    const track = stream && stream.getAudioTracks()[0];
+    const trackRate = track && track.getSettings().sampleRate;
+    const resampling = ctx.sampleRate === C.AI_SAMPLE_RATE
+      ? 'ресемплінг не потрібен'
+      : `ресемплінг до ${C.AI_SAMPLE_RATE} Гц так (усереднення, коефіцієнт ${(ctx.sampleRate / C.AI_SAMPLE_RATE).toFixed(2)})`;
+    onLog(`Частота дискретизації: AudioContext ${ctx.sampleRate} Гц, доріжка мікрофона ${trackRate ? `${trackRate} Гц` : 'невідомо'}, ${resampling}`);
+  }
+
   function analyze() {
     const now = performance.now();
     if (ctx.state !== 'running') {
@@ -979,7 +1005,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
     st.lastRms = rms;
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
-    if (st.env > C.AI_WAKE_RMS) st.ai.lastLoudAt = now;
+    updateAiWakefulness(now);
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
       calibrate(now);
@@ -1050,7 +1076,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     st = {
       startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
       ai: {
-        isReady: false, isBusy: false, isSnore: false, fastHits: 0, lastLoudAt: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
+        isReady: false, isBusy: false, isSnore: false, fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
       silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
@@ -1061,6 +1087,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     context.addEventListener('statechange', stateListener);
     setStatus('Калібрування тиші…');
     logMicState('старт');
+    logSampleRates();
     timerId = setInterval(analyze, C.ANALYSIS_INTERVAL_MS);
     startAi(context, source, st);
   }
@@ -1142,13 +1169,16 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const CLASS_MAP_URL = './vendor/yamnet/yamnet_class_map.csv';
   const SNORE_THRESHOLD_KEY = 'vio.snoreThreshold';
   const CALIBRATION_TICK_MS = 250;
+  const CALIBRATION_RAW_KEY = 'vio.calibrationRaw';
   const CALIBRATION_THRESHOLDS = Object.freeze([0.2, 0.3, 0.4]);
   const CALIBRATION_MIN_RECALL = 0.8;
+  const CALIBRATION_SCORED_KEYS = Object.freeze(['snoreOpen', 'snoreClosed', 'silence', 'speech']);
   const CALIBRATION_MIN_THRESHOLD = 0.1;
   const CALIBRATION_MIN_SAMPLES = 20;
   const CALIBRATION_STAGES = Object.freeze([
     { key: 'prep', label: 'Підготовка', seconds: 5, hint: 'Лежіть тихо: підключається мікрофон і нейромережа.' },
-    { key: 'snore', label: 'Хропіння', seconds: 60, hint: 'Хропіть голосно й рівно, як у справжньому сні.' },
+    { key: 'snoreOpen', label: 'Хропіння з відкритим ротом', seconds: 40, hint: 'Хропіть голосно й рівно з відкритим ротом.' },
+    { key: 'snoreClosed', label: 'Хропіння з закритим ротом, носом', seconds: 40, hint: 'Хропіть голосно й рівно із закритим ротом, носом.' },
     { key: 'silence', label: 'Тиша', seconds: 20, hint: 'Не рухайтесь і мовчіть.' },
     { key: 'speech', label: 'Розмова', seconds: 20, hint: 'Говоріть звичайним голосом.' }
   ]);
@@ -2015,20 +2045,43 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return classNames[index] || `клас ${index}`;
   }
 
-  function formatSample(sample) {
+  function formatSample(sample, stageLabel) {
     const top = sample.top.map((item) => `${className(item.index)} ${item.score.toFixed(2)}`).join(', ');
     const signal = sample.isSignalPlaying ? 'грає' : 'ні';
-    return `Діагностика: RMS ${sample.rms.toFixed(4)}, Snoring ${sample.snoring.toFixed(2)}, топ-3: ${top}, сигнал: ${signal}, режим гулу: ${sample.humMode}`;
+    const stageTag = stageLabel ? ` [${stageLabel}]` : '';
+    return `Діагностика${stageTag}: RMS ${sample.rms.toFixed(4)}, Snoring ${sample.snoring.toFixed(2)}, топ-3: ${top}, сигнал: ${signal}, режим гулу: ${sample.humMode}`;
   }
 
+  // Кожна секунда калібрування (включно з підготовкою) лишається в сирих даних; у статистику йдуть лише етапи з оцінкою
   function collectCalibrationSample(calibration, sample) {
     const stage = CALIBRATION_STAGES[calibration.stageIndex];
-    if (stage && stage.key !== 'prep') calibration.scores[stage.key].push(sample.snoring);
+    calibration.raw.push({
+      t: Date.now(), stage: stage ? stage.key : 'end', stageLabel: stage ? stage.label : '', rms: sample.rms, snoring: sample.snoring,
+      top: sample.top.map((item) => ({ index: item.index, name: className(item.index), score: item.score }))
+    });
+    if (stage && stage.key !== 'prep') calibration.scores[stage.key].push({ snoring: sample.snoring, rms: sample.rms });
+  }
+
+  function saveCalibrationRaw(calibration) {
+    try {
+      localStorage.setItem(CALIBRATION_RAW_KEY, JSON.stringify({
+        startedAt: calibration.startedAt, snoreThreshold: selectedSnoreThreshold, samples: calibration.raw
+      }));
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти сирі дані калібрування', err);
+      showAlert('Не вдалося зберегти сирі дані калібрування: сховище недоступне.');
+    }
   }
 
   // Раз на секунду (коли звук гучніший за DIAG_MIN_RMS) пишемо в «Звіти», що чує нейромережа
   function handleSample(sample) {
-    if (state.calibration) collectCalibrationSample(state.calibration, sample);
+    const calibration = state.calibration;
+    if (calibration) {
+      collectCalibrationSample(calibration, sample);
+      const stage = CALIBRATION_STAGES[calibration.stageIndex];
+      logEvent(formatSample(sample, stage ? stage.label : ''));
+      return;
+    }
     if (sample.rms <= DIAG_MIN_RMS) return;
     const s = state.session;
     if (s) {
@@ -2038,12 +2091,17 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     logEvent(formatSample(sample));
   }
 
-  function summarizeStage(label, values) {
-    const count = values.length;
-    const mean = count > 0 ? values.reduce((sum, v) => sum + v, 0) / count : 0;
-    const max = count > 0 ? Math.max(...values) : 0;
-    const shares = CALIBRATION_THRESHOLDS.map((limit) => (count > 0 ? values.filter((v) => v > limit).length / count : 0));
-    return { label, count, mean, max, shares };
+  function averageOf(values) {
+    return values.length > 0 ? values.reduce((sum, v) => sum + v, 0) / values.length : 0;
+  }
+
+  // Статистика етапу з вибірок { snoring, rms }
+  function summarizeStage(label, samples) {
+    const count = samples.length;
+    const scores = samples.map((sample) => sample.snoring);
+    const max = count > 0 ? Math.max(...scores) : 0;
+    const shares = CALIBRATION_THRESHOLDS.map((limit) => (count > 0 ? scores.filter((v) => v > limit).length / count : 0));
+    return { label, count, mean: averageOf(scores), max, shares, meanRms: averageOf(samples.map((sample) => sample.rms)) };
   }
 
   // Поріг посередині між найвищим скором тиші/розмови й скором, який перевищують 80% секунд хропіння
@@ -2081,22 +2139,21 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function renderCalibrationTable(stages) {
     const table = $('calibration-table');
-    const header = ['Етап', 'Секунд', 'Середній', 'Макс', ...CALIBRATION_THRESHOLDS.map((limit) => `>${limit.toFixed(2)}`)];
+    const header = ['Етап', 'Секунд', 'Сер. Snoring', 'Макс', ...CALIBRATION_THRESHOLDS.map((limit) => `>${limit.toFixed(2)}`), 'Сер. RMS'];
     const rows = stages.map((stage) => [
       stage.label, String(stage.count), stage.mean.toFixed(3), stage.max.toFixed(3),
-      ...stage.shares.map((share) => `${Math.round(share * 100)}%`)
+      ...stage.shares.map((share) => `${Math.round(share * 100)}%`), stage.meanRms.toFixed(4)
     ]);
     table.replaceChildren(buildCalibrationRow(header, 'th'), ...rows.map((cells) => buildCalibrationRow(cells, 'td')));
     table.classList.remove('hidden');
   }
 
   function showCalibrationResults(scores) {
-    const stages = [
-      summarizeStage('Хропіння', scores.snore),
-      summarizeStage('Тиша', scores.silence),
-      summarizeStage('Розмова', scores.speech)
-    ];
-    const advice = recommendThreshold(scores.snore, [...scores.silence, ...scores.speech]);
+    const labelOf = (key) => CALIBRATION_STAGES.find((stage) => stage.key === key).label;
+    const stages = CALIBRATION_SCORED_KEYS.map((key) => summarizeStage(labelOf(key), scores[key]));
+    const snoreScores = [...scores.snoreOpen, ...scores.snoreClosed].map((sample) => sample.snoring);
+    const noiseScores = [...scores.silence, ...scores.speech].map((sample) => sample.snoring);
+    const advice = recommendThreshold(snoreScores, noiseScores);
     renderCalibrationTable(stages);
     state.calibrationResult = advice.value;
     const current = `Поточний поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`;
@@ -2110,6 +2167,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     stages.forEach((stage) => addStandaloneEvent(
       `Калібрування, ${stage.label}: ${stage.count} с, середній ${stage.mean.toFixed(3)}, макс ${stage.max.toFixed(3)}, `
       + CALIBRATION_THRESHOLDS.map((limit, i) => `>${limit.toFixed(2)}: ${Math.round(stage.shares[i] * 100)}%`).join(', ')
+      + `, середній RMS ${stage.meanRms.toFixed(4)}`
     ));
     addStandaloneEvent(advice.value === null ? advice.reason : `Калібрування: рекомендований поріг Snoring ${advice.value.toFixed(3)}`);
   }
@@ -2169,6 +2227,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   async function releaseCalibration(c) {
     clearInterval(c.timerId);
     state.calibration = null;
+    saveCalibrationRaw(c);
     renderSession();
     await c.engine.stop();
     releaseHeadsetMic();
@@ -2214,8 +2273,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       renderSession();
     }
     state.calibration = {
-      engine, stageIndex: 0, stageStartedAt: performance.now(),
-      scores: { snore: [], silence: [], speech: [] }, timerId: setInterval(tickCalibration, CALIBRATION_TICK_MS)
+      engine, stageIndex: 0, stageStartedAt: performance.now(), startedAt: Date.now(), raw: [],
+      scores: Object.fromEntries(CALIBRATION_SCORED_KEYS.map((key) => [key, []])), timerId: setInterval(tickCalibration, CALIBRATION_TICK_MS)
     };
     state.calibrationResult = null;
     $('calibration-table').classList.add('hidden');
