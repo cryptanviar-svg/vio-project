@@ -796,6 +796,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   async function startAi(context, source, session) {
     try {
       if (!context.audioWorklet) throw new Error('AudioWorklet недоступний');
+      const isModelCached = Boolean(YamnetStore.model);
       await Promise.all([loadYamnet(), ensureCaptureWorklet(context)]);
       if (st !== session) return;
       aiBuffer = new Float32Array(C.AI_WINDOW_SAMPLES);
@@ -810,7 +811,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       // Класифікація запускається окремою задачею, а не прямо в обробнику таймера
       aiTimerId = setInterval(() => setTimeout(classify, 0), C.AI_HOP_MS);
       session.ai.isReady = true;
-      onLog('YAMNet завантажено: хропіння визначає нейромережа (клас Snoring)');
+      onLog(isModelCached
+        ? 'YAMNet уже в пам’яті (повторно не завантажується): хропіння визначає нейромережа'
+        : 'YAMNet завантажено: хропіння визначає нейромережа (клас Snoring)');
     } catch (err) {
       console.error('VIO: YAMNet недоступний', err);
       onLog('YAMNet недоступний — працюють лише тригери за гучністю');
@@ -837,9 +840,15 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   function calibrate(now) {
     if (now - st.startedAt < C.CALIBRATION_MS) return;
     st.isCalibrated = true;
+    // Bluetooth-гарнітурі потрібен час на перемикання в режим мікрофона: тишу до MIC_SILENT_MS ще не вважаємо збоєм
+    if (st.peakEnv === 0 && now - st.startedAt < C.MIC_SILENT_MS) {
+      st.isCalibrated = false;
+      return;
+    }
     if (st.peakEnv === 0) {
       setStatus('Мікрофон мовчить (RMS = 0): перевірте дозвіл і чи не зайнятий він іншим застосунком');
-      onLog(`Діагностика: аудіопотік порожній (RMS = 0) за ${C.CALIBRATION_MS / 1000} с після старту`);
+      onLog(`Діагностика: аудіопотік порожній (RMS = 0) за ${C.MIC_SILENT_MS / 1000} с після старту`);
+      logMicState('RMS = 0');
       return;
     }
     setStatus('Слухаю');
@@ -871,8 +880,23 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     st.ai.updatedAt = now;
   }
 
+  // Стан аудіоядра й доріжки мікрофона для діагностики (suspended контекст віддає нулі)
+  function logMicState(stage) {
+    const track = stream && stream.getAudioTracks()[0];
+    const trackInfo = track
+      ? `доріжка: readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}, мікрофон="${track.label || 'невідомо'}"`
+      : 'доріжки немає';
+    onLog(`Мікрофон (${stage}): AudioContext=${ctx ? ctx.state : 'немає'}, ${trackInfo}`);
+  }
+
   function analyze() {
     const now = performance.now();
+    if (ctx.state !== 'running') {
+      // Призупинений контекст віддає нулі: відновлюємо його й не рахуємо цей кадр тишею
+      ctx.resume().catch((err) => console.error('VIO: не вдалося відновити AudioContext', err));
+      st.silentSince = null;
+      return;
+    }
     analyser.getFloatTimeDomainData(buffer);
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
@@ -959,6 +983,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     stateListener = () => onRunningChange(isRunning());
     context.addEventListener('statechange', stateListener);
     setStatus('Калібрування тиші…');
+    logMicState('старт');
     timerId = setInterval(analyze, C.ANALYSIS_INTERVAL_MS);
     startAi(context, source, st);
   }
