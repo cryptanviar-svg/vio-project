@@ -163,7 +163,7 @@
         </div>
       </div>
       <p class="px-2 text-xs leading-relaxed text-zinc-300">
-        Удень дозволені обидва виходи: гарнітура й динамік смартфона.
+        Звук ніколи не виводиться на динамік смартфона.
       </p>
     </section>
 
@@ -637,7 +637,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRunningChange, onSilent }) {
+function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -902,6 +902,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
     const rms = Math.sqrt(sum / buffer.length);
     detectSilentStream(rms, now);
+    if (!st.isRmsReported && now - st.startedAt >= C.MIC_SILENT_MS) {
+      st.isRmsReported = true;
+      onLog(`Рівень RMS через ${C.MIC_SILENT_MS / 1000} с після старту: ${rms.toFixed(5)}`);
+    }
     st.lastRms = rms;
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
     if (st.env > C.AI_WAKE_RMS) st.ai.lastLoudAt = now;
@@ -924,6 +928,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       throw new Error('Цей браузер не дає доступу до мікрофона.');
     }
     VioAudio.unlock();
+    // Мікрофон гарнітури має бути підключений ДО getUserMedia, інакше потік відкриється на іншому джерелі й віддасть нулі
+    await prepareMic();
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -976,7 +982,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
         isReady: false, isBusy: false, isSnore: false, fastHits: 0, lastLoudAt: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
         accumulator: 0, accumulated: 0, position: 0
       },
-      silentSince: null, lastFrameAt: null, isSilenceReported: false,
+      silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };
     stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onLost));
@@ -1014,27 +1020,6 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     }
   }
 
-  // Перенаправляє вихід двигуна: 'speaker' — вбудований динамік, 'default' — системний вихід (гарнітура)
-  async function routeOutput(target) {
-    if (!ctx || typeof ctx.setSinkId !== 'function') {
-      return { ok: false, reason: 'браузер не підтримує setSinkId; звук іде на системний вихід' };
-    }
-    try {
-      let sinkId = '';
-      if (target === 'speaker') {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const speaker = devices.find((d) => d.kind === 'audiooutput'
-          && d.deviceId !== 'default' && d.deviceId !== 'communications' && !isBluetoothLabel(d.label));
-        sinkId = speaker ? speaker.deviceId : '';
-      }
-      await ctx.setSinkId(sinkId);
-      return { ok: true };
-    } catch (err) {
-      console.error('VIO: помилка setSinkId', err);
-      return { ok: false, reason: 'помилка перемикання виходу' };
-    }
-  }
-
   // Повний Mute звуку й вібрації; мікрофон і детекція працюють далі. Після Unmute вібрація відновиться з наступним епізодом/чанком
   function setMuted(shouldMute) {
     isMuted = shouldMute;
@@ -1052,7 +1037,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     return Boolean(stream) && stream.getAudioTracks().some((track) => track.readyState === 'live');
   }
 
-  return { start, stop, routeOutput, setMuted, isRunning, isMicLive, forceSnore };
+  return { start, stop, setMuted, isRunning, isMicLive, forceSnore };
 }
 </script>
 
@@ -1069,7 +1054,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   const EVENTS_KEY = 'vio.events';
   const HUM_MODE_KEY = 'vio.humMode';
   const MAX_STORED_EVENTS = 200;
-  const MAX_MIC_RESTARTS = 3;
+  const MAX_MIC_RESTARTS = 1;
+  const HEADSET_MIC_TIMEOUT_MS = 8000;
+  const HEADSET_RETRY_MS = 10000;
+  const NIGHT_NEEDS_HEADSET_LABEL = 'Підключіть Bluetooth-гарнітуру';
   const BLUETOOTH_PATTERN = /bluetooth|airpods|buds|headset|headphone|hands-free|handsfree|\bbt\b/i;
   // У нативній оболонці Capacitor тип аудіовиходу й фоновий сервіс дає Android; у браузері цих плагінів немає
   const isNative = Boolean(window.Capacitor && typeof window.Capacitor.registerPlugin === 'function'
@@ -1079,8 +1067,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
 
   const OUTPUT = {
     bluetooth: { text: '🎧 Bluetooth-гарнітура', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
-    speaker: { text: '📱 Динамік смартфона (Резерв)', dot: 'bg-orange-400', tone: 'text-orange-300' },
-    ready: { text: '✅ Аудіоканал активовано (Bluetooth/Динамік)', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
+    none: { text: '🔌 Гарнітуру не підключено', dot: 'bg-orange-400', tone: 'text-orange-300' },
+    ready: { text: '✅ Аудіоканал активовано', dot: 'bg-emerald-400', tone: 'text-emerald-300' },
     denied: { text: '⛔ Немає доступу до мікрофона', dot: 'bg-red-500', tone: 'text-red-300' },
     unknown: { text: 'Не перевірено (звук піде на системний вихід)', dot: 'bg-zinc-600', tone: 'text-zinc-200' }
   };
@@ -1191,7 +1179,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     if (NativeAudioRoute) {
       try {
         const route = await NativeAudioRoute.getRoute();
-        return route.kind === 'bluetooth' ? 'bluetooth' : 'speaker';
+        return route.kind === 'bluetooth' ? 'bluetooth' : 'none';
       } catch (err) {
         console.error('VIO: помилка нативного визначення аудіовиходу', err);
         return 'unknown';
@@ -1205,10 +1193,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
         // Мобільний Chrome часто не показує виходи: після дозволу дивимось на мітки мікрофонів (гарнітура додає свій)
         const inputs = devices.filter((d) => d.kind === 'audioinput' && d.label);
         if (inputs.length === 0) return 'unknown';
-        return inputs.some((d) => BLUETOOTH_PATTERN.test(d.label)) ? 'bluetooth' : 'speaker';
+        return inputs.some((d) => BLUETOOTH_PATTERN.test(d.label)) ? 'bluetooth' : 'none';
       }
       const active = outputs.find((d) => d.deviceId === 'default') || outputs[0];
-      return BLUETOOTH_PATTERN.test(active.label) ? 'bluetooth' : 'speaker';
+      return BLUETOOTH_PATTERN.test(active.label) ? 'bluetooth' : 'none';
     } catch (err) {
       console.error('VIO: помилка визначення аудіовиходу', err);
       return 'unknown';
@@ -1276,6 +1264,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
   /* ---------- Інженерний тест хропіння ---------- */
 
   async function onSimulate() {
+    if (effectiveOutput() === 'none') {
+      $('sim-status').textContent = `${NIGHT_NEEDS_HEADSET_LABEL}: звук не виводиться на динамік смартфона.`;
+      return;
+    }
     const button = $('test-snore-btn');
     button.disabled = true;
     if (state.engine) state.engine.forceSnore(ENGINE_CONFIG.FORCED_SNORE_MS);
@@ -1297,23 +1289,76 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     renderReports();
   }
 
-  // Втрата Bluetooth не зупиняє сесію: звук і вібрація повністю вимикаються (Mute), мікрофон слухає далі; з поверненням гарнітури звук відновлюється
+  // Втрата гарнітури не зупиняє сесію: звук і вібрація вимкнені, мікрофон телефону не використовується; з поверненням гарнітури все вмикається саме
   async function enforceFailSafe() {
     const s = state.session;
-    if (!s || s.mode !== 'night' || !state.engine) return;
-    const isOnBluetooth = effectiveOutput() !== 'speaker';
-    if (!isOnBluetooth && !s.isOnFallback) {
-      s.isOnFallback = true;
-      s.fallbacks += 1;
-      state.engine.setMuted(true);
-      showAlert('Fail-Safe: Bluetooth-вихід втрачено. Звук і вібрацію вимкнено, мікрофон слухає далі.');
-      logEvent('Bluetooth-вихід втрачено — звук і вібрацію повністю вимкнено (Mute), мікрофон продовжує слухати');
-    } else if (isOnBluetooth && s.isOnFallback) {
-      s.isOnFallback = false;
-      state.engine.setMuted(false);
-      showAlert('');
-      logEvent('Bluetooth-вихід відновлено — звук і вібрацію знову увімкнено');
+    if (!s || s.mode !== 'night' || state.isStarting || state.isRestarting) return;
+    const hasHeadset = effectiveOutput() !== 'none';
+    if (!hasHeadset && !s.isWaitingHeadset) await pauseForHeadset(s);
+    else if (hasHeadset && s.isWaitingHeadset) await resumeFromHeadset(s);
+  }
+
+  // Гарнітуру відключено: гасимо звук і вібрацію, зупиняємо мікрофон (щоб Android не підставив мікрофон телефону) і чекаємо
+  async function pauseForHeadset(s) {
+    s.isWaitingHeadset = true;
+    s.fallbacks += 1;
+    const old = state.engine;
+    state.engine = null;
+    if (old) {
+      old.setMuted(true);
+      await old.stop();
     }
+    releaseHeadsetMic();
+    setSessionStatus('Очікую повернення Bluetooth-гарнітури…');
+    showAlert('Гарнітуру відключено. Звуку немає, сесія чекає на її повернення.');
+    logEvent('Гарнітуру відключено — звук, вібрацію й мікрофон вимкнено, сесія чекає на гарнітуру');
+  }
+
+  // Гарнітура повернулась: заново підключаємо її мікрофон і запускаємо двигун; збій повторюється через HEADSET_RETRY_MS
+  async function resumeFromHeadset(s) {
+    state.isRestarting = true;
+    try {
+      const engine = buildEngine(false);
+      await engine.start();
+      if (state.session !== s) {
+        await engine.stop();
+        return;
+      }
+      state.engine = engine;
+      s.isWaitingHeadset = false;
+      setSessionStatus('Слухаю');
+      showAlert('');
+      logEvent('Гарнітуру повернено — мікрофон і звук знову увімкнено');
+      syncBackgroundService();
+      setTimeout(refreshOutput, 0);
+    } catch (err) {
+      console.error('VIO: не вдалося відновити роботу з гарнітурою', err);
+      logEvent(`Гарнітуру виявлено, але мікрофон не підключився: ${err.message}. Повторна спроба через ${HEADSET_RETRY_MS / 1000} с`);
+      setTimeout(refreshOutput, HEADSET_RETRY_MS);
+    } finally {
+      state.isRestarting = false;
+    }
+  }
+
+  // Нативний канал мікрофона гарнітури (SCO / пристрій зв'язку); у браузері його немає
+  function releaseHeadsetMic() {
+    if (!NativeAudioRoute) return;
+    NativeAudioRoute.disconnectHeadsetMic().catch((err) => console.error('VIO: не вдалося вимкнути мікрофон гарнітури', err));
+  }
+
+  // Вмикає мікрофон гарнітури й чекає підтвердження; без підтвердження сесія не стартує, щоб не слухати мікрофоном телефону
+  async function connectHeadsetMic(isForced) {
+    if (!NativeAudioRoute) {
+      logEvent('Мікрофон гарнітури: нативне керування недоступне в браузері, вибір мікрофона лишається за системою');
+      return;
+    }
+    const result = await NativeAudioRoute.connectHeadsetMic({ timeoutMs: HEADSET_MIC_TIMEOUT_MS, force: isForced });
+    const waited = (result.waitedMs / 1000).toFixed(1);
+    if (!result.connected) {
+      logEvent(`Мікрофон гарнітури НЕ підключився за ${waited} с: ${result.reason}`);
+      throw new Error('Мікрофон Bluetooth-гарнітури не підключився. Перевірте гарнітуру й спробуйте ще раз.');
+    }
+    logEvent(`Мікрофон гарнітури підключено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`);
   }
 
   /* ---------- Сесії ---------- */
@@ -1331,8 +1376,16 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     renderSession();
   }
 
-  function handleMicLost() {
-    if (!state.session) return;
+  // Доріжка мікрофона обірвалась: якщо це зникла гарнітура — сесія чекає на неї, інакше (дозвіл, збій) її зупинено
+  async function handleMicLost() {
+    const s = state.session;
+    if (!s || s.isWaitingHeadset) return;
+    if (s.mode === 'night' && (await detectOutput()) === 'none') {
+      state.output = 'none';
+      renderOutput();
+      await enforceFailSafe();
+      return;
+    }
     logEvent('Мікрофон втрачено — сесію зупинено');
     stopSession('failsafe');
     showAlert('Fail-Safe: втрачено доступ до мікрофона. Нічну сесію зупинено.');
@@ -1407,7 +1460,8 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
 
   // Сповіщення «нічна сесія триває» існує лише поки нічна сесія активна й AudioContext справді в стані 'running'
   function syncBackgroundService() {
-    const shouldRun = isNightSessionActive() && Boolean(state.engine) && state.engine.isRunning();
+    const isListening = Boolean(state.engine) && state.engine.isRunning();
+    const shouldRun = isNightSessionActive() && (isListening || state.session.isWaitingHeadset);
     if (shouldRun === state.isServiceRunning) return;
     state.isServiceRunning = shouldRun;
     if (shouldRun) {
@@ -1418,9 +1472,9 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     logEvent('Аудіоядро не працює — фонове сповіщення знято');
   }
 
-  function buildEngine() {
+  function buildEngine(isRetry) {
     return createAcousticEngine({
-      isBluetoothLabel: (label) => BLUETOOTH_PATTERN.test(label),
+      prepareMic: () => connectHeadsetMic(isRetry),
       onLog: logEvent,
       onStatus: setSessionStatus,
       onLost: handleMicLost,
@@ -1434,25 +1488,24 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     const s = state.session;
     if (!s || s.mode !== 'night' || state.isRestarting) return;
     if (state.micRestarts >= MAX_MIC_RESTARTS) {
-      logEvent(`Мікрофон мовчить навіть після ${MAX_MIC_RESTARTS} перезапусків — перевірте гарнітуру й дозвіл`);
+      logEvent('Мікрофон гарнітури мовчить навіть після повторного підключення — перевірте гарнітуру й дозвіл');
       showAlert('Мікрофон мовчить: перевірте гарнітуру, дозвіл і чи не зайнятий мікрофон іншим застосунком.');
       return;
     }
     state.micRestarts += 1;
     state.isRestarting = true;
-    logEvent(`Мікрофон мовчить (RMS = 0) — перезапуск аудіопотоку, спроба ${state.micRestarts} з ${MAX_MIC_RESTARTS}`);
+    logEvent(`Мікрофон мовчить (RMS = 0) понад ${ENGINE_CONFIG.MIC_SILENT_MS / 1000} с — одне повторне підключення мікрофона гарнітури`);
     const old = state.engine;
     state.engine = null;
     try {
       if (old) await old.stop();
-      const engine = buildEngine();
+      const engine = buildEngine(true);
       await engine.start();
       if (state.session !== s) {
         await engine.stop();
         return;
       }
       state.engine = engine;
-      if (s.isOnFallback) engine.setMuted(true);
       syncBackgroundService();
     } catch (err) {
       console.error('VIO: не вдалося перезапустити аудіопотік', err);
@@ -1461,6 +1514,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       showAlert(`Fail-Safe: ${err.message} Нічну сесію зупинено.`);
     } finally {
       state.isRestarting = false;
+      setTimeout(refreshOutput, 0);
     }
   }
 
@@ -1468,12 +1522,17 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     if (state.session || state.isStarting) return;
     showAlert('');
     if (mode === 'night') {
-      const engine = buildEngine();
+      if (effectiveOutput() === 'none') {
+        showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: нічна сесія працює лише з гарнітурою.`);
+        return;
+      }
+      const engine = buildEngine(false);
       state.micRestarts = 0;
       state.isStarting = true;
       try {
         await engine.start();
       } catch (err) {
+        releaseHeadsetMic();
         showAlert(err.message);
         return;
       } finally {
@@ -1482,7 +1541,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       state.engine = engine;
     }
     state.session = {
-      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isOnFallback: false
+      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isWaitingHeadset: false
     };
     logEvent(mode === 'night' ? 'Нічну сесію розпочато (вихід: Bluetooth-гарнітура)' : 'Денну сесію розпочато');
     state.tickId = setInterval(tick, 1000);
@@ -1507,6 +1566,7 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
     releaseWakeLock();
     state.isServiceRunning = false;
     stopBackgroundService();
+    releaseHeadsetMic();
     const seconds = Math.round((Date.now() - s.start) / 1000);
     saveSessions([...loadSessions(), {
       mode: s.mode, start: s.start, seconds, endedBy, events: s.events, fallbacks: s.fallbacks
@@ -1532,9 +1592,10 @@ function createAcousticEngine({ isBluetoothLabel, onLog, onStatus, onLost, onRun
       $(`${mode}-timer`).textContent = formatClock(active ? s.seconds : 0);
       $(`${mode}-status`).textContent = active ? (s.status || 'Сесія триває') : blocked ? 'Іншу сесію запущено'
         : 'Сесію не запущено';
-      $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : `Почати ${label} сесію`;
-      $(`${mode}-toggle`).disabled = blocked;
-      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked);
+      const needsHeadset = mode === 'night' && !s && effectiveOutput() === 'none';
+      $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL : `Почати ${label} сесію`;
+      $(`${mode}-toggle`).disabled = blocked || needsHeadset;
+      $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsHeadset);
     }
     renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';

@@ -8,6 +8,7 @@ const PERMISSIONS = [
   'android.permission.RECORD_AUDIO',
   'android.permission.CAMERA',
   'android.permission.MODIFY_AUDIO_SETTINGS',
+  'android.permission.BLUETOOTH_CONNECT',
   'android.permission.VIBRATE',
   'android.permission.WAKE_LOCK',
   'android.permission.FOREGROUND_SERVICE',
