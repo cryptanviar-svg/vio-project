@@ -37,3 +37,15 @@ for (const shard of shards) {
   writeFileSync(`${MODEL_DIR}/${shard}`, await download(shard));
 }
 console.log(`VIO: tf.min.js і YAMNet (${shards.length} шардів) скопійовано у vendor/`);
+
+// Назви 521 класу YAMNet для підписів у звітах діагностики (звичайний CSV, не код)
+const CLASS_MAP_URL = 'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv';
+const CLASS_MAP_FILE = `${MODEL_DIR}/yamnet_class_map.csv`;
+const CLASS_MAP_LINES = 522;
+if (!existsSync(CLASS_MAP_FILE)) {
+  const response = await fetch(CLASS_MAP_URL);
+  if (!response.ok) fail(`не вдалося завантажити мапу класів: HTTP ${response.status}`);
+  const text = await response.text();
+  if (text.trim().split('\n').length !== CLASS_MAP_LINES) fail('мапа класів YAMNet має неочікуваний розмір');
+  writeFileSync(CLASS_MAP_FILE, text);
+}

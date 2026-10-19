@@ -73,6 +73,21 @@
                 class="mt-3 w-full rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 active:bg-zinc-900">
           Тест мікрофона
         </button>
+        <button id="calibration-toggle" type="button"
+                class="mt-3 w-full rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 active:bg-zinc-900">
+          Калібрування
+        </button>
+        <div id="calibration-panel" class="mt-4 hidden space-y-3 rounded-2xl border border-zinc-800 p-4">
+          <p id="calibration-stage" class="text-sm font-semibold text-zinc-100"></p>
+          <p id="calibration-timer" class="text-center text-5xl font-light tabular-nums text-zinc-100">0</p>
+          <p id="calibration-hint" class="text-xs leading-relaxed text-zinc-300"></p>
+          <table id="calibration-table" class="hidden w-full text-xs tabular-nums text-zinc-200"></table>
+          <p id="calibration-result" class="whitespace-pre-line text-xs leading-relaxed text-zinc-300"></p>
+          <button id="calibration-apply" type="button"
+                  class="hidden w-full rounded-2xl bg-gold-500 py-3 text-sm font-semibold text-black active:opacity-80">
+            Застосувати рекомендований поріг
+          </button>
+        </div>
         <div id="mic-test-panel" class="mt-4 hidden space-y-3 rounded-2xl border border-zinc-800 p-4">
           <p id="mic-test-route" class="whitespace-pre-line text-xs leading-relaxed text-zinc-300"></p>
           <div class="h-8 w-full overflow-hidden rounded-lg bg-zinc-900">
@@ -287,6 +302,7 @@ const ENGINE_CONFIG = Object.freeze({
   AI_CLASS_COUNT: 521,
   AI_SNORING_CLASS: 38,
   AI_SNORE_MIN_SCORE: 0.4,
+  DIAG_TOP_CLASSES: 3,
   // Швидкий тригер: Snoring понад AI_FAST_SCORE разом із RMS понад AI_FAST_RMS AI_FAST_HITS класифікацій поспіль запускає Рефлекс одразу після останньої
   AI_FAST_SCORE: 0.25,
   AI_FAST_RMS: 0.012,
@@ -466,6 +482,24 @@ function scheduleClicks(context, destination, t0) {
 
 const HUM_MODES = Object.freeze(['base', 'jitter', 'binaural', 'noise', 'tremolo']);
 let selectedHumMode = 'base';
+// Поріг класу Snoring: за замовчуванням з конфігурації, а після калібрування — збережене користувачем значення
+let selectedSnoreThreshold = ENGINE_CONFIG.AI_SNORE_MIN_SCORE;
+
+function setSnoreThreshold(value) {
+  if (Number.isFinite(value) && value > 0 && value < 1) selectedSnoreThreshold = value;
+}
+
+// Кілька класів з найвищими оцінками: [{ index, score }] за спаданням
+function topClasses(scores, count) {
+  const best = [];
+  scores.forEach((score, index) => {
+    if (best.length >= count && score <= best[best.length - 1].score) return;
+    best.push({ index, score });
+    best.sort((a, b) => b.score - a.score);
+    if (best.length > count) best.pop();
+  });
+  return best;
+}
 
 function setHumMode(mode) {
   if (HUM_MODES.includes(mode)) selectedHumMode = mode;
@@ -651,7 +685,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent }) {
+function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent, onSample }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -666,10 +700,19 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   let st = null;
   let isMuted = false;
   let stateListener = null;
+  let isCalibrating = false;
+  let isHeadsetConfirmed = false;
 
   // Аудіоядро реально працює лише в стані 'running': suspended/interrupted/closed означає, що слухання мікрофона мертве
   function isRunning() {
     return Boolean(ctx) && ctx.state === 'running';
+  }
+
+  // Мікрофон справний: гарнітура підтверджена, аудіоядро працює, доріжка жива й не заглушена.
+  // Тоді RMS = 0 — це тиша (шумозаглушення гарнітури віддає цифровий нуль), а не мертвий потік
+  function isMicHealthy() {
+    const track = stream && stream.getAudioTracks()[0];
+    return isHeadsetConfirmed && isRunning() && Boolean(track) && track.readyState === 'live' && !track.muted;
   }
 
   function setStatus(text) {
@@ -702,6 +745,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   /* ---------- Хропіння: епізоди ---------- */
 
   function startEpisode(now, reason) {
+    if (isCalibrating) return;
     st.episode = { start: now, lastActive: now, attack: startAttack(ctx, master), isStage2: false, nextVibAt: 0 };
     setStatus('Хропіння виявлено — Рефлекс 1');
     onLog(`Хропіння підтверджено (${reason}) — Рефлекс 1: серія кліків 4 кГц по черзі в ліве й праве вухо`);
@@ -778,7 +822,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (now < ai.forcedUntil) return;
     if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
     const isGraceOver = ai.lastLoudAt === null || now - ai.lastLoudAt > C.AI_SLEEP_DELAY_MS;
-    if (session.env <= C.AI_WAKE_RMS && isGraceOver) {
+    if (!isCalibrating && session.env <= C.AI_WAKE_RMS && isGraceOver) {
       ai.isSnore = false;
       ai.fastHits = 0;
       ai.updatedAt = performance.now();
@@ -793,8 +837,12 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const isFastHit = snoring > C.AI_FAST_SCORE && session.lastRms > C.AI_FAST_RMS;
       ai.fastHits = isFastHit ? ai.fastHits + 1 : 0;
       const isFastConfirmed = ai.fastHits >= C.AI_FAST_HITS;
-      ai.isSnore = snoring > C.AI_SNORE_MIN_SCORE || isFastConfirmed;
+      ai.isSnore = snoring > selectedSnoreThreshold || isFastConfirmed;
       ai.updatedAt = performance.now();
+      onSample({
+        rms: session.lastRms, snoring, top: topClasses(scores, C.DIAG_TOP_CLASSES),
+        isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
+      });
       if (isFastConfirmed && st === session && !session.episode && ai.updatedAt >= session.lockoutUntil) {
         startEpisode(ai.updatedAt, 'швидкий тригер: Snoring і гучний звук');
       }
@@ -854,6 +902,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function calibrate(now) {
     if (now - st.startedAt < C.CALIBRATION_MS) return;
     st.isCalibrated = true;
+    if (st.peakEnv === 0 && isMicHealthy()) {
+      onLog('Тиша: RMS = 0, але мікрофон гарнітури живий (шумозаглушення) — це не збій');
+      setStatus('Слухаю');
+      return;
+    }
     // Bluetooth-гарнітурі потрібен час на перемикання в режим мікрофона: тишу до MIC_SILENT_MS ще не вважаємо збоєм
     if (st.peakEnv === 0 && now - st.startedAt < C.MIC_SILENT_MS) {
       st.isCalibrated = false;
@@ -881,6 +934,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (st.silentSince === null || isStalled) st.silentSince = now;
     if (now - st.silentSince < C.MIC_SILENT_MS || st.isSilenceReported) return;
     st.isSilenceReported = true;
+    if (isMicHealthy()) {
+      onLog(`RMS = 0 понад ${C.MIC_SILENT_MS / 1000} с, але мікрофон гарнітури живий: це тиша, перезапуск не потрібен`);
+      return;
+    }
     setStatus('Мікрофон мовчить (RMS = 0): перезапускаю аудіопотік…');
     onSilent();
   }
@@ -943,7 +1000,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
     VioAudio.unlock();
     // Мікрофон гарнітури має бути підключений ДО getUserMedia, інакше потік відкриється на іншому джерелі й віддасть нулі
-    await prepareMic();
+    isHeadsetConfirmed = Boolean(await prepareMic());
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -1051,7 +1108,12 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return Boolean(stream) && stream.getAudioTracks().some((track) => track.readyState === 'live');
   }
 
-  return { start, stop, setMuted, isRunning, isMicLive, forceSnore };
+  // Режим калібрування: нейромережа працює завжди, а сигнали (кліки, гул, вібрація) не грають
+  function setCalibrating(shouldCalibrate) {
+    isCalibrating = shouldCalibrate;
+  }
+
+  return { start, stop, setMuted, isRunning, isMicLive, forceSnore, setCalibrating };
 }
 </script>
 
@@ -1075,6 +1137,21 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const TEST_UPDATE_MS = 100;
   const TEST_REPORT_MS = 5000;
   const TEST_METER_FULL_RMS = 0.1;
+  const DIAG_MIN_RMS = 0.003;
+  const MAX_DIAG_ROWS = 300;
+  const CLASS_MAP_URL = './vendor/yamnet/yamnet_class_map.csv';
+  const SNORE_THRESHOLD_KEY = 'vio.snoreThreshold';
+  const CALIBRATION_TICK_MS = 250;
+  const CALIBRATION_THRESHOLDS = Object.freeze([0.2, 0.3, 0.4]);
+  const CALIBRATION_MIN_RECALL = 0.8;
+  const CALIBRATION_MIN_THRESHOLD = 0.1;
+  const CALIBRATION_MIN_SAMPLES = 20;
+  const CALIBRATION_STAGES = Object.freeze([
+    { key: 'prep', label: 'Підготовка', seconds: 5, hint: 'Лежіть тихо: підключається мікрофон і нейромережа.' },
+    { key: 'snore', label: 'Хропіння', seconds: 60, hint: 'Хропіть голосно й рівно, як у справжньому сні.' },
+    { key: 'silence', label: 'Тиша', seconds: 20, hint: 'Не рухайтесь і мовчіть.' },
+    { key: 'speech', label: 'Розмова', seconds: 20, hint: 'Говоріть звичайним голосом.' }
+  ]);
   const NO_HEADSET_DEVICE_REASON = 'no-device';
   const PHONE_MIC_WARNING = 'Увага: Android не віддає мікрофон гарнітури, тому слухає вбудований мікрофон телефону. Покладіть телефон поруч із ліжком, а звук іде в гарнітуру.';
   const NIGHT_NEEDS_HEADSET_LABEL = 'Підключіть Bluetooth-гарнітуру';
@@ -1107,6 +1184,9 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     isWakeLockPending: false,
     isWakeLockWarned: false,
     isStarting: false,
+    calibration: null,
+    calibrationResult: null,
+    isCalibrationStarting: false,
     isRestarting: false,
     micRestarts: 0,
     isServiceRunning: false,
@@ -1370,7 +1450,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   async function connectHeadsetMic(isForced) {
     if (!NativeAudioRoute) {
       logEvent('Мікрофон гарнітури: нативне керування недоступне в браузері, вибір мікрофона лишається за системою');
-      return;
+      return false;
     }
     let result;
     try {
@@ -1378,21 +1458,22 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     } catch (err) {
       console.error('VIO: помилка підключення мікрофона гарнітури', err);
       logEvent(`Мікрофон гарнітури: помилка підключення (${err.message}); відкриваю мікрофон без підтвердження`);
-      return;
+      return false;
     }
     const waited = (result.waitedMs / 1000).toFixed(1);
     logEvent(`Система: ${result.android}; пристрої зв'язку: ${result.devices}`);
     // Відсутність підтвердження не блокує старт: про проблему скаже лише RMS = 0 понад MIC_SILENT_MS
     if (result.connected) {
       logEvent(`Мікрофон гарнітури підтверджено, очікування ${waited} с${isForced ? ' (повторне підключення)' : ''}`);
-      return;
+      return true;
     }
     if (result.reason === NO_HEADSET_DEVICE_REASON) {
       logEvent(`Система не пропонує мікрофон гарнітури (SCO / BLE) за ${waited} с: режим дзвінка не вмикався, слухає вбудований мікрофон телефону`);
       showAlert(PHONE_MIC_WARNING);
-      return;
+      return false;
     }
     logEvent(`Мікрофон гарнітури не підтверджено за ${waited} с (${result.reason}); відкриваю мікрофон і слухаю далі`);
+    return false;
   }
 
   /* ---------- Сесії ---------- */
@@ -1400,7 +1481,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   function logEvent(text) {
     console.info(`[VIO] ${text}`);
     const s = state.session;
-    if (!s && (state.isMicTestStarting || state.micTest)) {
+    if (!s && isTestActive()) {
       addStandaloneEvent(text);
       return;
     }
@@ -1416,6 +1497,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   // Доріжка мікрофона обірвалась: якщо це зникла гарнітура — сесія чекає на неї, інакше (дозвіл, збій) її зупинено
   async function handleMicLost() {
+    if (state.calibration) {
+      showAlert('Калібрування перервано: мікрофон втрачено (гарнітуру відключено?).');
+      stopCalibration('мікрофон втрачено');
+      return;
+    }
     const s = state.session;
     if (!s || s.isWaitingHeadset) return;
     if (s.mode === 'night' && (await detectOutput()) === 'none') {
@@ -1427,6 +1513,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     logEvent('Мікрофон втрачено — сесію зупинено');
     stopSession('failsafe');
     showAlert('Fail-Safe: втрачено доступ до мікрофона. Нічну сесію зупинено.');
+  }
+
+  function isTestActive() {
+    return Boolean(state.micTest) || state.isMicTestStarting || Boolean(state.calibration) || state.isCalibrationStarting;
   }
 
   function isNightSessionActive() {
@@ -1517,7 +1607,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       onStatus: setSessionStatus,
       onLost: handleMicLost,
       onRunningChange: syncBackgroundService,
-      onSilent: restartEngine
+      onSilent: restartEngine,
+      onSample: handleSample
     });
   }
 
@@ -1557,13 +1648,14 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   async function startSession(mode) {
-    if (state.session || state.isStarting || state.micTest || state.isMicTestStarting) return;
+    if (state.session || state.isStarting || isTestActive()) return;
     showAlert('');
     if (mode === 'night') {
       if (effectiveOutput() === 'none') {
         showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: нічна сесія працює лише з гарнітурою.`);
         return;
       }
+      await loadClassNames();
       const engine = buildEngine(false);
       state.micRestarts = 0;
       state.isStarting = true;
@@ -1579,7 +1671,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       state.engine = engine;
     }
     state.session = {
-      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isWaitingHeadset: false
+      mode, start: Date.now(), seconds: 0, status: '', events: [], fallbacks: 0, isWaitingHeadset: false, diagRows: 0
     };
     logEvent(mode === 'night' ? 'Нічну сесію розпочато (вихід: Bluetooth-гарнітура)' : 'Денну сесію розпочато');
     state.tickId = setInterval(tick, 1000);
@@ -1632,11 +1724,12 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         : 'Сесію не запущено';
       const needsHeadset = mode === 'night' && !s && effectiveOutput() === 'none';
       $(`${mode}-toggle`).textContent = active ? 'Зупинити сесію' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL : `Почати ${label} сесію`;
-      const isTestBlocking = mode === 'night' && (Boolean(state.micTest) || state.isMicTestStarting);
+      const isTestBlocking = mode === 'night' && isTestActive();
       $(`${mode}-toggle`).disabled = blocked || needsHeadset || isTestBlocking;
       $(`${mode}-toggle`).classList.toggle('opacity-40', blocked || needsHeadset || isTestBlocking);
     }
     renderMicTestButton();
+    renderCalibrationButton();
     renderBanner();
     $('mask-clock').textContent = s ? formatClock(s.seconds) : '';
   }
@@ -1645,7 +1738,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const button = $('mic-test-toggle');
     const isBusy = state.isMicTestStarting;
     const needsHeadset = !state.micTest && effectiveOutput() === 'none';
-    const isBlocked = Boolean(state.session) || isBusy || needsHeadset;
+    const isBlocked = Boolean(state.session) || isBusy || needsHeadset || Boolean(state.calibration) || state.isCalibrationStarting;
     button.textContent = state.micTest ? 'Зупинити тест' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL : isBusy ? 'Підключаю мікрофон…' : 'Тест мікрофона';
     button.disabled = isBlocked;
     button.classList.toggle('opacity-40', isBlocked);
@@ -1829,7 +1922,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   // Той самий старт мікрофона, що й у нічної сесії (connectHeadsetMic + getUserMedia), але без нейромережі й без звуків
   async function startMicTest() {
-    if (state.session || state.micTest || state.isMicTestStarting || state.isStarting) return;
+    if (state.session || state.isStarting || isTestActive()) return;
     if (effectiveOutput() === 'none') {
       showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: тест мікрофона працює лише з гарнітурою.`);
       return;
@@ -1898,6 +1991,258 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     stopMicTest();
   }
 
+  /* ---------- Діагностика та калібрування ---------- */
+
+  const classNames = [];
+
+  // Назви 521 класу YAMNet (лише для підписів у звітах); без файлу показуємо номер класу
+  async function loadClassNames() {
+    if (classNames.length > 0) return;
+    try {
+      const response = await fetch(CLASS_MAP_URL);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const lines = (await response.text()).split('\n').slice(1);
+      for (const line of lines) {
+        const match = /^(\d+),[^,]*,(.*)$/.exec(line.trim());
+        if (match) classNames[Number(match[1])] = match[2].replace(/^"|"$/g, '');
+      }
+    } catch (err) {
+      console.error('VIO: не вдалося завантажити назви класів YAMNet', err);
+    }
+  }
+
+  function className(index) {
+    return classNames[index] || `клас ${index}`;
+  }
+
+  function formatSample(sample) {
+    const top = sample.top.map((item) => `${className(item.index)} ${item.score.toFixed(2)}`).join(', ');
+    const signal = sample.isSignalPlaying ? 'грає' : 'ні';
+    return `Діагностика: RMS ${sample.rms.toFixed(4)}, Snoring ${sample.snoring.toFixed(2)}, топ-3: ${top}, сигнал: ${signal}, режим гулу: ${sample.humMode}`;
+  }
+
+  function collectCalibrationSample(calibration, sample) {
+    const stage = CALIBRATION_STAGES[calibration.stageIndex];
+    if (stage && stage.key !== 'prep') calibration.scores[stage.key].push(sample.snoring);
+  }
+
+  // Раз на секунду (коли звук гучніший за DIAG_MIN_RMS) пишемо в «Звіти», що чує нейромережа
+  function handleSample(sample) {
+    if (state.calibration) collectCalibrationSample(state.calibration, sample);
+    if (sample.rms <= DIAG_MIN_RMS) return;
+    const s = state.session;
+    if (s) {
+      if (s.diagRows >= MAX_DIAG_ROWS) return;
+      s.diagRows += 1;
+    }
+    logEvent(formatSample(sample));
+  }
+
+  function summarizeStage(label, values) {
+    const count = values.length;
+    const mean = count > 0 ? values.reduce((sum, v) => sum + v, 0) / count : 0;
+    const max = count > 0 ? Math.max(...values) : 0;
+    const shares = CALIBRATION_THRESHOLDS.map((limit) => (count > 0 ? values.filter((v) => v > limit).length / count : 0));
+    return { label, count, mean, max, shares };
+  }
+
+  // Поріг посередині між найвищим скором тиші/розмови й скором, який перевищують 80% секунд хропіння
+  function recommendThreshold(snore, others) {
+    if (snore.length < CALIBRATION_MIN_SAMPLES) {
+      return { value: null, reason: `Замало даних про хропіння (${snore.length} с): класифікація не встигала або мікрофон мовчав.` };
+    }
+    const sorted = [...snore].sort((a, b) => a - b);
+    const high = sorted[Math.floor(sorted.length * (1 - CALIBRATION_MIN_RECALL))];
+    const noiseMax = others.length > 0 ? Math.max(...others) : 0;
+    const low = Math.max(noiseMax, CALIBRATION_MIN_THRESHOLD);
+    const value = Math.round(((low + high) / 2) * 1000) / 1000;
+    if (high <= low || value <= low || value >= high) {
+      return {
+        value: null,
+        reason: `Поріг не підібрано: 80% хропіння мають скор вище ${high.toFixed(3)}, а тиша чи розмова сягали ${noiseMax.toFixed(3)}.`
+      };
+    }
+    return {
+      value,
+      reason: `Хропіння вище порога ≥ ${CALIBRATION_MIN_RECALL * 100}% секунд; тиша й розмова не перевищили ${noiseMax.toFixed(3)}.`
+    };
+  }
+
+  function buildCalibrationRow(cells, tag) {
+    const row = document.createElement('tr');
+    cells.forEach((text) => {
+      const cell = document.createElement(tag);
+      cell.className = 'py-1 pr-2 text-left';
+      cell.textContent = text;
+      row.append(cell);
+    });
+    return row;
+  }
+
+  function renderCalibrationTable(stages) {
+    const table = $('calibration-table');
+    const header = ['Етап', 'Секунд', 'Середній', 'Макс', ...CALIBRATION_THRESHOLDS.map((limit) => `>${limit.toFixed(2)}`)];
+    const rows = stages.map((stage) => [
+      stage.label, String(stage.count), stage.mean.toFixed(3), stage.max.toFixed(3),
+      ...stage.shares.map((share) => `${Math.round(share * 100)}%`)
+    ]);
+    table.replaceChildren(buildCalibrationRow(header, 'th'), ...rows.map((cells) => buildCalibrationRow(cells, 'td')));
+    table.classList.remove('hidden');
+  }
+
+  function showCalibrationResults(scores) {
+    const stages = [
+      summarizeStage('Хропіння', scores.snore),
+      summarizeStage('Тиша', scores.silence),
+      summarizeStage('Розмова', scores.speech)
+    ];
+    const advice = recommendThreshold(scores.snore, [...scores.silence, ...scores.speech]);
+    renderCalibrationTable(stages);
+    state.calibrationResult = advice.value;
+    const current = `Поточний поріг Snoring: ${selectedSnoreThreshold.toFixed(3)}`;
+    $('calibration-result').textContent = advice.value === null
+      ? `${advice.reason}\n${current}`
+      : `Рекомендований поріг: ${advice.value.toFixed(3)}. ${advice.reason}\n${current}`;
+    $('calibration-apply').classList.toggle('hidden', advice.value === null);
+    $('calibration-stage').textContent = 'Калібрування завершено';
+    $('calibration-timer').textContent = '✓';
+    $('calibration-hint').textContent = '';
+    stages.forEach((stage) => addStandaloneEvent(
+      `Калібрування, ${stage.label}: ${stage.count} с, середній ${stage.mean.toFixed(3)}, макс ${stage.max.toFixed(3)}, `
+      + CALIBRATION_THRESHOLDS.map((limit, i) => `>${limit.toFixed(2)}: ${Math.round(stage.shares[i] * 100)}%`).join(', ')
+    ));
+    addStandaloneEvent(advice.value === null ? advice.reason : `Калібрування: рекомендований поріг Snoring ${advice.value.toFixed(3)}`);
+  }
+
+  function readSnoreThreshold() {
+    try {
+      return Number.parseFloat(localStorage.getItem(SNORE_THRESHOLD_KEY));
+    } catch (err) {
+      console.error('VIO: не вдалося прочитати поріг хропіння', err);
+      return Number.NaN;
+    }
+  }
+
+  function saveSnoreThreshold(value) {
+    try {
+      localStorage.setItem(SNORE_THRESHOLD_KEY, String(value));
+    } catch (err) {
+      console.error('VIO: не вдалося зберегти поріг хропіння', err);
+      showAlert('Не вдалося зберегти поріг: сховище недоступне.');
+    }
+  }
+
+  function applyRecommendedThreshold() {
+    const value = state.calibrationResult;
+    if (value === null || value === undefined) return;
+    const previous = selectedSnoreThreshold;
+    setSnoreThreshold(value);
+    saveSnoreThreshold(value);
+    state.calibrationResult = null;
+    $('calibration-apply').classList.add('hidden');
+    $('calibration-result').textContent = `Поріг Snoring застосовано: ${value.toFixed(3)} (було ${previous.toFixed(3)}). Діє в нових сесіях і зберігається в налаштуваннях.`;
+    addStandaloneEvent(`Поріг Snoring змінено з ${previous.toFixed(3)} на ${value.toFixed(3)} за результатами калібрування`);
+  }
+
+  function renderCalibrationStage() {
+    const c = state.calibration;
+    const stage = CALIBRATION_STAGES[c.stageIndex];
+    $('calibration-stage').textContent = `Етап ${c.stageIndex + 1} з ${CALIBRATION_STAGES.length}: ${stage.label}`;
+    $('calibration-hint').textContent = `${stage.hint} Сигнал у цей час не грає.`;
+    $('calibration-timer').textContent = String(stage.seconds);
+  }
+
+  function tickCalibration() {
+    const c = state.calibration;
+    if (!c) return;
+    const stage = CALIBRATION_STAGES[c.stageIndex];
+    const elapsed = (performance.now() - c.stageStartedAt) / 1000;
+    if (elapsed < stage.seconds) {
+      $('calibration-timer').textContent = String(Math.ceil(stage.seconds - elapsed));
+      return;
+    }
+    c.stageIndex += 1;
+    c.stageStartedAt = performance.now();
+    if (c.stageIndex >= CALIBRATION_STAGES.length) finishCalibration(); else renderCalibrationStage();
+  }
+
+  async function releaseCalibration(c) {
+    clearInterval(c.timerId);
+    state.calibration = null;
+    renderSession();
+    await c.engine.stop();
+    releaseHeadsetMic();
+  }
+
+  async function finishCalibration() {
+    const c = state.calibration;
+    await releaseCalibration(c);
+    showCalibrationResults(c.scores);
+  }
+
+  async function stopCalibration(reason) {
+    const c = state.calibration;
+    if (!c) return;
+    await releaseCalibration(c);
+    $('calibration-panel').classList.add('hidden');
+    addStandaloneEvent(`Калібрування перервано: ${reason}`);
+  }
+
+  // Нічна сесія в режимі калібрування: той самий старт мікрофона й нейромережа, але сигнали не грають
+  async function startCalibration() {
+    if (state.session || state.isStarting || isTestActive()) return;
+    if (effectiveOutput() === 'none') {
+      showAlert(`${NIGHT_NEEDS_HEADSET_LABEL}: калібрування працює лише з гарнітурою.`);
+      return;
+    }
+    showAlert('');
+    state.isCalibrationStarting = true;
+    renderSession();
+    const engine = buildEngine(false);
+    engine.setCalibrating(true);
+    try {
+      await loadClassNames();
+      logEvent('Калібрування: запуск');
+      await engine.start();
+    } catch (err) {
+      console.error('VIO: не вдалося запустити калібрування', err);
+      releaseHeadsetMic();
+      showAlert(`Калібрування не запустилось: ${err.message}`);
+      return;
+    } finally {
+      state.isCalibrationStarting = false;
+      renderSession();
+    }
+    state.calibration = {
+      engine, stageIndex: 0, stageStartedAt: performance.now(),
+      scores: { snore: [], silence: [], speech: [] }, timerId: setInterval(tickCalibration, CALIBRATION_TICK_MS)
+    };
+    state.calibrationResult = null;
+    $('calibration-table').classList.add('hidden');
+    $('calibration-result').textContent = '';
+    $('calibration-apply').classList.add('hidden');
+    $('calibration-panel').classList.remove('hidden');
+    renderCalibrationStage();
+    renderSession();
+  }
+
+  function renderCalibrationButton() {
+    const button = $('calibration-toggle');
+    const isBusy = state.isCalibrationStarting;
+    const isOtherBusy = Boolean(state.session) || Boolean(state.micTest) || state.isMicTestStarting;
+    const needsHeadset = !state.calibration && effectiveOutput() === 'none';
+    const isBlocked = !state.calibration && (isBusy || isOtherBusy || needsHeadset);
+    button.textContent = state.calibration ? 'Скасувати калібрування' : needsHeadset ? NIGHT_NEEDS_HEADSET_LABEL
+      : isBusy ? 'Підключаю мікрофон…' : 'Калібрування';
+    button.disabled = isBlocked;
+    button.classList.toggle('opacity-40', isBlocked);
+  }
+
+  function initSnoreThreshold() {
+    const saved = readSnoreThreshold();
+    if (Number.isFinite(saved)) setSnoreThreshold(saved);
+  }
+
   /* ---------- Режим сигналу ---------- */
 
   function readHumMode() {
@@ -1934,6 +2279,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function init() {
     initHumMode();
+    initSnoreThreshold();
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => setTab(btn.dataset.tab));
     });
@@ -1945,6 +2291,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     $('mic-test-toggle').addEventListener('click', () => {
       if (state.micTest) stopMicTest(); else startMicTest();
     });
+    $('calibration-toggle').addEventListener('click', () => {
+      if (state.calibration) stopCalibration('скасовано користувачем'); else startCalibration();
+    });
+    $('calibration-apply').addEventListener('click', applyRecommendedThreshold);
     $('output-action').addEventListener('click', onOutputAction);
     $('test-snore-btn').addEventListener('click', onSimulate);
     $('bt-banner-close').addEventListener('click', () => {
