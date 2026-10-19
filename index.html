@@ -241,6 +241,7 @@
     <p id="mask-clock" class="absolute text-2xl font-light tabular-nums" style="color:#2a2a2e"></p>
   </div>
 
+<script src="./snore-core.js"></script>
 <script>
 /* Акустичний двигун VIO: Web Audio (low-latency), детекція хропіння, драбина біофідбеку */
 const ENGINE_CONFIG = Object.freeze({
@@ -704,7 +705,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   let analyser = null;
   let master = null;
   let buffer = null;
-  let aiBuffer = null;
+  let aiInput = null;
   let aiTimerId = null;
   let captureNode = null;
   let timerId = null;
@@ -797,87 +798,40 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   /* ---------- Хропіння: нейромережа YAMNet ---------- */
 
-  // Знижує частоту дискретизації до 16 кГц усередненням і складає семпли в кільцевий буфер
+  // Знижує частоту дискретизації до 16 кГц усередненням і складає семпли в кільцевий буфер (спільний код у snore-core.js)
   function pushSamples(chunk) {
-    if (!ctx || !st) return;
-    const ai = st.ai;
-    const ratio = ctx.sampleRate / C.AI_SAMPLE_RATE;
-    for (let i = 0; i < chunk.length; i++) {
-      ai.accumulator += chunk[i];
-      ai.accumulated += 1;
-      ai.position += 1;
-      if (ai.position < ratio) continue;
-      aiBuffer[ai.writeIndex] = ai.accumulator / ai.accumulated;
-      ai.writeIndex = (ai.writeIndex + 1) % aiBuffer.length;
-      ai.filled = Math.min(ai.filled + 1, aiBuffer.length);
-      ai.accumulator = 0;
-      ai.accumulated = 0;
-      ai.position -= ratio;
-    }
-  }
-
-  function latestWindow() {
-    const window = new Float32Array(aiBuffer.length);
-    const oldest = st.ai.writeIndex;
-    window.set(aiBuffer.subarray(oldest), 0);
-    window.set(aiBuffer.subarray(0, oldest), aiBuffer.length - oldest);
-    return window;
+    if (!ctx || !st || !aiInput) return;
+    aiInput.push(chunk);
   }
 
   // Нейромережа спить, поки в кімнаті тихо: model.predict не викликається і CPU не навантажується.
   // Прокидається при RMS понад AI_WAKE_RMS, а засинає лише після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS (гістерезис), щоб паузи між вдихами не обривали аналіз
-  function describeHit(hit) {
-    const classes = hit.top.map((item) => `${classLabel(item.index)} ${item.score.toFixed(2)}`).join(', ');
-    return `${new Date(hit.wall).toLocaleTimeString('uk-UA')} Snoring ${hit.snoring.toFixed(2)} [${classes}]`;
-  }
-
-  function describeConfirmation(hits) {
-    return `підтвердження скором (поріг ${selectedSnoreThreshold.toFixed(2)}, ${hits.length} с за ${C.AI_CONFIRM_WINDOW_MS / 1000} с): ${hits.map(describeHit).join(' і ')}`;
-  }
-
   async function classify() {
     const session = st;
     const ai = session.ai;
     const now = performance.now();
     if (now < ai.forcedUntil) return;
-    if (!ai.isReady || ai.isBusy || ai.filled < C.AI_WINDOW_SAMPLES) return;
+    if (!ai.isReady || ai.isBusy || !aiInput.isFull()) return;
     if (!isCalibrating && !ai.isAwake) {
-      ai.updatedAt = performance.now();
-      ai.isSnore = ai.isSnore && ai.updatedAt - ai.lastWeakAt < C.AI_HOLD_QUIET_MS;
-      ai.snoreHits = [];
-      ai.fastHits = 0;
+      VioCore.idleScore(ai, C, performance.now());
       return;
     }
     ai.isBusy = true;
     try {
-      const samples = latestWindow();
+      const samples = aiInput.latestWindow();
       const scores = await scoreWindow(YamnetStore.model, samples);
       samples.fill(0);
       const snoring = scores[C.AI_SNORING_CLASS];
-      const isFastHit = snoring > C.AI_FAST_SCORE && session.lastRms > C.AI_FAST_RMS;
-      ai.fastHits = isFastHit ? ai.fastHits + 1 : 0;
-      const isFastConfirmed = ai.fastHits >= C.AI_FAST_HITS;
-      ai.updatedAt = performance.now();
       const top = topClasses(scores, C.DIAG_TOP_CLASSES);
-      const isAboveThreshold = snoring > selectedSnoreThreshold;
-      if (snoring > C.AI_HOLD_SCORE) ai.lastWeakAt = ai.updatedAt;
-      const freshHits = ai.snoreHits.filter((hit) => ai.updatedAt - hit.at < C.AI_CONFIRM_WINDOW_MS);
-      ai.snoreHits = isAboveThreshold ? [...freshHits, { at: ai.updatedAt, wall: Date.now(), snoring, top }] : freshHits;
-      const isScoreConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
-      const fastReason = `швидкий тригер: Snoring ${snoring.toFixed(2)} і RMS ${session.lastRms.toFixed(3)}, ${ai.fastHits} класифікації поспіль`;
-      const isHeld = ai.isSnore && ai.updatedAt - ai.lastWeakAt < C.AI_HOLD_QUIET_MS;
-      ai.isSnore = isScoreConfirmed || isFastConfirmed || isHeld;
-      if (isScoreConfirmed) {
-        ai.snoreReason = describeConfirmation(ai.snoreHits.slice(-C.AI_CONFIRM_HITS));
-        ai.snoreHits = [];
-      } else if (isFastConfirmed) {
-        ai.snoreReason = fastReason;
-      }
+      const { isFastConfirmed, fastReason } = VioCore.registerScore(ai, C, {
+        now: performance.now(), wall: Date.now(), snoring, rms: session.lastRms, top,
+        threshold: selectedSnoreThreshold, classLabel
+      });
       onSample({
         rms: session.lastRms, snoring, top,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
-      if (isFastConfirmed && st === session && !session.episode && ai.updatedAt >= session.lockoutUntil) {
+      if (isFastConfirmed && st === session && VioCore.canStartEpisode(session, ai.updatedAt)) {
         startEpisode(ai.updatedAt, fastReason);
       }
     } catch (err) {
@@ -895,7 +849,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       const isModelCached = Boolean(YamnetStore.model);
       await Promise.all([loadYamnet(), ensureCaptureWorklet(context)]);
       if (st !== session) return;
-      aiBuffer = new Float32Array(C.AI_WINDOW_SAMPLES);
+      aiInput = VioCore.createAiBuffer(C, context.sampleRate);
       captureNode = new AudioWorkletNode(context, CAPTURE_WORKLET_NAME);
       const sink = context.createGain();
       sink.gain.value = 0;
@@ -918,22 +872,9 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   // Тригер: клас Snoring (свіжий вердикт ШІ) АБО гучність понад LOUD_RMS довше LOUD_HOLD_MS; Рефлекс стартує одразу, без правила про сплески
   function trackTriggers(now, rms) {
-    const ai = st.ai;
-    const isSnoreHit = ai.isReady && now - ai.updatedAt < C.AI_STALE_MS && ai.isSnore;
-    if (rms > C.LOUD_RMS) {
-      if (st.loudSince === null) st.loudSince = now;
-    } else {
-      st.loudSince = null;
-    }
-    const isLoudHit = st.loudSince !== null && now - st.loudSince >= C.LOUD_HOLD_MS;
-    const isForced = now < ai.forcedUntil;
-    st.isActive = isSnoreHit || isLoudHit || isForced;
-    if (!st.isActive || st.episode || now < st.lockoutUntil) return;
-    const reason = isSnoreHit ? ai.snoreReason : isLoudHit
-      ? `гучний звук: RMS ${rms.toFixed(3)} понад ${C.LOUD_RMS} довше ${C.LOUD_HOLD_MS / 1000} с` : 'інженерний тест';
-    startEpisode(now, reason);
+    const reason = VioCore.evaluateTriggers(st, C, now, rms);
+    if (reason) startEpisode(now, reason);
   }
-
   function calibrate(now) {
     if (now - st.startedAt < C.CALIBRATION_MS) return;
     st.isCalibrated = true;
@@ -995,22 +936,6 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     onLog(`Мікрофон (${stage}): AudioContext=${ctx ? ctx.state : 'немає'}, ${trackInfo}`);
   }
 
-  // Гістерезис нейромережі: прокидання при env > AI_WAKE_RMS, засинання після AI_SLEEP_DELAY_MS безперервно нижче AI_SLEEP_RMS
-  function updateAiWakefulness(now) {
-    const ai = st.ai;
-    if (st.env > C.AI_WAKE_RMS) {
-      ai.isAwake = true;
-      ai.belowSince = null;
-      return;
-    }
-    if (st.env >= C.AI_SLEEP_RMS) {
-      ai.belowSince = null;
-      return;
-    }
-    if (ai.belowSince === null) ai.belowSince = now;
-    if (ai.isAwake && now - ai.belowSince > C.AI_SLEEP_DELAY_MS) ai.isAwake = false;
-  }
-
   // Частоти дискретизації: контекст, доріжка мікрофона й чи знижується звук до частоти YAMNet
   function logSampleRates() {
     const track = stream && stream.getAudioTracks()[0];
@@ -1040,7 +965,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
     st.lastRms = rms;
     st.env += C.ENVELOPE_SMOOTHING * (rms - st.env);
-    updateAiWakefulness(now);
+    VioCore.updateAiWakefulness(st.ai, st.env, C, now);
     if (st.env > st.peakEnv) st.peakEnv = st.env;
     if (!st.isCalibrated) {
       calibrate(now);
@@ -1110,10 +1035,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     buffer = new Float32Array(node.fftSize);
     st = {
       startedAt: performance.now(), env: 0, lastRms: 0, peakEnv: 0, loudSince: null, isActive: false, episode: null,
-      ai: {
-        isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreHits: [], lastWeakAt: 0, fastHits: 0, isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0, filled: 0, writeIndex: 0,
-        accumulator: 0, accumulated: 0, position: 0
-      },
+      ai: VioCore.createAiState(),
       silentSince: null, lastFrameAt: null, isSilenceReported: false, isRmsReported: false,
       lockoutUntil: 0, isCalibrated: false, isVibrationWarned: false, status: ''
     };

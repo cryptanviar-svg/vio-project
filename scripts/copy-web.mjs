@@ -1,6 +1,6 @@
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 
-const WEB_FILES = ['index.html', 'tailwind.css', 'manifest.json', 'icon.svg'];
+const WEB_FILES = ['index.html', 'snore-core.js', 'tailwind.css', 'manifest.json', 'icon.svg'];
 const VENDOR_DIR = 'vendor';
 const OUT_DIR = 'www';
 const CAPACITOR_RUNTIME = 'node_modules/@capacitor/core/dist/capacitor.js';
