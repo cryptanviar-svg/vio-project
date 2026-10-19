@@ -317,8 +317,8 @@ const ENGINE_CONFIG = Object.freeze({
   // Підтвердження: щонайменше AI_CONFIRM_HITS секунд зі Snoring понад поріг протягом AI_CONFIRM_WINDOW_MS
   AI_CONFIRM_HITS: 2,
   AI_CONFIRM_WINDOW_MS: 30000,
-  // Або одна секунда зі Snoring від AI_SINGLE_SCORE (0 вимикає): правило В із порівняння в tools/replay
-  AI_SINGLE_SCORE: 0.7,
+  // Або одна секунда зі Snoring від AI_SINGLE_SCORE (0 вимикає); значення порівнювались у tools/replay
+  AI_SINGLE_SCORE: 0.5,
   // Розмова не вважається хропінням: секунда зі Speech від AI_SPEECH_MIN_SCORE (або Speech у топ-AI_SPEECH_TOP_RANK) не враховується в жодному правилі
   AI_SPEECH_CLASS: 0,
   AI_SPEECH_MIN_SCORE: 0.5,
@@ -823,10 +823,6 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (!ai.isReady || ai.isBusy || !aiInput.isFull()) return;
     if (!isCalibrating && !ai.isAwake) {
       VioCore.idleScore(ai, C, performance.now());
-      onSample({
-        rms: session.lastRms, isAwake: false, snoring: 0, speech: 0, top: [], isSpeech: false,
-        isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
-      });
       return;
     }
     ai.isBusy = true;
@@ -2462,12 +2458,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
   }
 
-  // Секунда нічної сесії: RMS, чи нейромережа прокинута, Snoring і Speech, топ-3, чи секунду відсіяно забороною Speech
+  // Секунда нічної сесії: RMS, Snoring і Speech, топ-3, чи секунду відсіяно забороною Speech
   function formatSessionSecond(sample) {
-    const top = sample.top.length > 0 ? sample.top.map((item) => `${className(item.index)} ${item.score.toFixed(2)}`).join(', ') : '—';
-    const network = sample.isAwake ? 'прокинута' : 'спить';
-    const scores = sample.isAwake ? `Snoring ${sample.snoring.toFixed(2)}, Speech ${sample.speech.toFixed(2)}` : 'Snoring —, Speech —';
-    return `Секунда: RMS ${sample.rms.toFixed(4)}, нейромережа ${network}, ${scores}, топ-3: ${top}, заборона Speech: ${sample.isSpeech ? 'так' : 'ні'}`;
+    const top = sample.top.map((item) => `${className(item.index)} ${item.score.toFixed(2)}`).join(', ');
+    return `Секунда: RMS ${sample.rms.toFixed(4)}, Snoring ${sample.snoring.toFixed(2)}, Speech ${sample.speech.toFixed(2)}, топ-3: ${top}, заборона Speech: ${sample.isSpeech ? 'так' : 'ні'}`;
   }
 
   // Рядок діагностики секунди: найстаріші рядки діагностики витісняються, щоб журнал не розростався понад MAX_DIAG_ROWS
@@ -2484,7 +2478,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     s.diagRows += 1;
   }
 
-  // Кожна секунда, де RMS вищий за DIAG_MIN_RMS або нейромережа працювала, йде в журнал сесії без фільтра по Snoring
+  // Кожна секунда, де нейромережа працювала і RMS вищий за DIAG_MIN_RMS, йде в журнал сесії без фільтра по Snoring
   function handleSample(sample) {
     const calibration = state.calibration;
     if (calibration) {
@@ -2493,7 +2487,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       logEvent(formatSample(sample, stage ? stage.label : ''));
       return;
     }
-    if (!sample.isAwake && sample.rms <= DIAG_MIN_RMS) return;
+    if (!sample.isAwake || sample.rms <= DIAG_MIN_RMS) return;
     logDiagRow(formatSessionSecond(sample));
   }
 

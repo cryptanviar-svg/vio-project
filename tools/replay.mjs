@@ -13,8 +13,8 @@ const SAMPLES_DIR = 'tools/samples';
 const POSITIVE_CLASS = 'snoring';
 const NEGATIVE_CLASSES = ['breathing', 'coughing', 'sneezing', 'mouse_click', 'keyboard_typing', 'door_wood_knock', 'dog', 'vacuum_cleaner', 'clock_tick'];
 const RULES = Object.freeze([
-  { name: 'Нове: 2 с вище 0.20 за 30 с або одна ≥ 0.70, із забороною Speech', hits: 2, windowMs: 30000, single: 0.7, isSpeechBanned: true },
-  { name: 'Для порівняння: те саме без заборони Speech', hits: 2, windowMs: 30000, single: 0.7, isSpeechBanned: false }
+  { name: 'Нове: 2 с вище 0.20 за 30 с або одна секунда ≥ 0.50, із забороною Speech', hits: 2, windowMs: 30000, single: 0.5, isSpeechBanned: true },
+  { name: 'Було: 2 с вище 0.20 за 30 с або одна секунда ≥ 0.70, із забороною Speech', hits: 2, windowMs: 30000, single: 0.7, isSpeechBanned: true }
 ]);
 const CURRENT_RULE_INDEX = 0;
 const PAIR_GAP_S = 12;
