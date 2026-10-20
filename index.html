@@ -348,10 +348,15 @@ const ENGINE_CONFIG = Object.freeze({
   FORCED_SNORE_MS: 3000,
   // Доріжка мікрофона, заглушена довше за MIC_MUTE_GRACE_MS, вважається недоступною
   MIC_MUTE_GRACE_MS: 3000,
-  AI_STALE_MS: 2500
+  AI_STALE_MS: 2500,
+  // Вікно звуку з RMS нижче AI_SKIP_RMS (цифровий нуль або майже тиша) нейромережа не аналізує: секунда рахується як без Snoring і без Speech.
+  // Найтихіше справжнє хропіння в нічних звітах мало RMS 0.0006 після фільтра, тож запас утричі
+  AI_SKIP_RMS: 0.0002
 });
 
 /* Нейромережа YAMNet: модель, TensorFlow.js і воркліт захоплення лежать у vendor/ і працюють локально */
+// Позначка епізоду, запущеного інженерним тестом, а не правилом моделі: у підсумок сесії він не входить
+const RULE_TEST = 'test';
 const CAPTURE_WORKLET_NAME = 'vio-capture';
 const CAPTURE_WORKLET_CODE = `
 class VioCapture extends AudioWorkletProcessor {
@@ -791,7 +796,7 @@ async function simulateSnoreAttack() {
   }
 }
 
-function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent, onSample, onMuted = () => {}, getTuning = () => ({ wakeRms: ENGINE_CONFIG.AI_WAKE_RMS }), classLabel = (index) => `клас ${index}` }) {
+function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningChange, onSilent, onSample, onMuted = () => {}, onEpisode = () => {}, getTuning = () => ({ wakeRms: ENGINE_CONFIG.AI_WAKE_RMS }), classLabel = (index) => `клас ${index}` }) {
   const C = ENGINE_CONFIG;
   let ctx = null;
   let chain = [];
@@ -851,16 +856,20 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   /* ---------- Хропіння: епізоди ---------- */
 
-  function startEpisode(now, reason) {
+  function startEpisode(now, reason, rule) {
     if (isCalibrating) return;
     const attack = startAttack(ctx, master, (mode) => onLog(`Режим гулу: ${HUM_LABELS[mode]}`));
-    st.episode = { start: now, lastActive: now, attack, isStage2: false, nextVibAt: 0 };
+    st.episode = { start: now, lastActive: now, attack, isStage2: false, nextVibAt: 0, rule };
     setStatus('Хропіння виявлено — Рефлекс 1');
-    onLog(`Хропіння підтверджено (${reason}) — Рефлекс 1: серія кліків 4 кГц по черзі в ліве й праве вухо`);
+    onEpisode({ phase: 'start', rule, isMuted });
+    onLog(isMuted
+      ? `Хропіння підтверджено (${reason}) — звуку й вібрації немає: гарнітуру втрачено`
+      : `Хропіння підтверджено (${reason}) — Рефлекс 1: серія кліків 4 кГц по черзі в ліве й праве вухо`);
   }
 
   function endEpisode(now, reason) {
     const ep = st.episode;
+    onEpisode({ phase: 'end', rule: ep.rule, isMuted, durationMs: now - ep.start });
     ep.attack.stop();
     if (typeof navigator.vibrate === 'function') navigator.vibrate(0);
     st.episode = null;
@@ -887,7 +896,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (!ep.isStage2) {
       ep.isStage2 = true;
       setStatus('Хропіння триває — Рефлекс 2');
-      onLog('Хропіння понад 3 с — Рефлекс 2: наростаючий гул 350 Гц і пульсуюча вібрація');
+      onEpisode({ phase: 'stage2', rule: ep.rule, isMuted });
+      onLog(isMuted
+        ? 'Хропіння понад 3 с — звуку й вібрації немає: гарнітуру втрачено'
+        : 'Хропіння понад 3 с — Рефлекс 2: наростаючий гул 350 Гц і пульсуюча вібрація');
     }
     pulseVibration(ep, now);
   }
@@ -915,12 +927,14 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     ai.isBusy = true;
     try {
       const samples = aiInput.latestWindow();
-      const scores = await scoreWindow(YamnetStore.model, samples);
+      const isSkipped = VioCore.isNearSilence(C, samples);
+      const scores = isSkipped ? null : await scoreWindow(YamnetStore.model, samples);
       samples.fill(0);
-      const snoring = scores[C.AI_SNORING_CLASS];
-      const top = topClasses(scores, C.DIAG_TOP_CLASSES);
-      const speech = scores[C.AI_SPEECH_CLASS];
-      const { isFastConfirmed, fastReason, isSpeech, isSpeechBlocked } = VioCore.registerScore(ai, C, {
+      const snoring = scores ? scores[C.AI_SNORING_CLASS] : 0;
+      const top = scores ? topClasses(scores, C.DIAG_TOP_CLASSES) : [];
+      const speech = scores ? scores[C.AI_SPEECH_CLASS] : 0;
+      const register = isSkipped ? VioCore.registerSilence : VioCore.registerScore;
+      const { isFastConfirmed, fastReason, isSpeech, isSpeechBlocked } = register(ai, C, {
         now: performance.now(), wall: Date.now(), snoring, speech, rms: session.lastRms, top,
         threshold: C.AI_SNORE_MIN_SCORE, classLabel
       });
@@ -928,11 +942,11 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
         onLog(`Розмову відсіяно: Speech ${speech.toFixed(2)}, Snoring ${snoring.toFixed(2)} — секунду не враховано`);
       }
       onSample({
-        rms: session.lastRms, isAwake: true, snoring, speech, top, isSpeech,
+        rms: session.lastRms, isAwake: true, snoring, speech, top, isSpeech, isSkipped,
         isSignalPlaying: Boolean(session.episode), humMode: selectedHumMode
       });
       if (isFastConfirmed && st === session && VioCore.canStartEpisode(session, ai.updatedAt)) {
-        startEpisode(ai.updatedAt, fastReason);
+        startEpisode(ai.updatedAt, fastReason, VioCore.RULE_FAST);
       }
     } catch (err) {
       console.error('VIO: помилка класифікації YAMNet', err);
@@ -972,7 +986,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   function trackTriggers(now, rms) {
     const reason = VioCore.evaluateTriggers(st, C, now, rms);
-    if (reason) startEpisode(now, reason);
+    if (reason) startEpisode(now, reason, reason === st.ai.snoreReason ? st.ai.snoreRule : RULE_TEST);
   }
   function calibrate(now) {
     if (now - st.startedAt < C.CALIBRATION_MS) return;
@@ -1233,7 +1247,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
 
   const STORAGE_KEY = 'vio.sessions';
   const MAX_LOG_ROWS = 50;
-  const MAX_SESSION_EVENTS = 5000;
+  const MAX_SESSION_EVENTS = 30000;
   const MASK_IDLE_MS = 10000;
   const MASK_SHIFT_MS = 60000;
   const MAX_STORED_SESSIONS = 200;
@@ -1248,8 +1262,17 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   const TEST_UPDATE_MS = 100;
   const TEST_REPORT_MS = 5000;
   const TEST_METER_FULL_RMS = 0.1;
-  const DIAG_MIN_RMS = 0.0005;
-  const MAX_DIAG_ROWS = 600;
+  const SNORE_ROW_MIN_SCORE = 0.10;
+  const MINUTE_MS = 60000;
+  const HEADSET_REASON_WAIT_MS = 500;
+  const MAX_FAST_RESTORE_ATTEMPTS = 6;
+  const SLOW_RESTORE_EVERY_POLLS = 6;
+  const LOW_BATTERY_PERCENT = 15;
+  const LOSS_EVENT_WINDOW_MS = 120000;
+  const MAX_HEADSET_EVENTS = 20;
+  const MAX_LOGGED_RESTORE_FAILURES = 3;
+  const LOG_FILE_PREFIX = 'vio-night-';
+  const LOG_FLUSH_WAIT_MS = 50;
   const LIVE_SESSION_KEY = 'vio.liveSession';
   const LIVE_SAVE_EVERY_S = 30;
   const REPORT_MIME = 'text/plain';
@@ -1317,6 +1340,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     isRestarting: false,
     micRestarts: 0,
     isServiceRunning: false,
+    headsetEvents: [],
+    headsetBattery: null,
+    hasCommunicationHeadset: false,
+    headsetPollId: null,
     tickId: null,
     maskIdleId: null,
     maskShiftId: null
@@ -1594,7 +1621,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (NativeAudioRoute) {
       try {
         const route = await NativeAudioRoute.getRoute();
-        return { kind: route.kind === 'bluetooth' ? 'bluetooth' : 'none', name: route.name || '' };
+        return { kind: route.kind === 'bluetooth' ? 'bluetooth' : 'none', name: route.name || '', hasCommunicationHeadset: Boolean(route.hasCommunicationHeadset) };
       } catch (err) {
         console.error('VIO: помилка нативного визначення аудіовиходу', err);
         return { kind: 'unknown', name: '' };
@@ -1644,6 +1671,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const detectedOutput = await detectOutput();
     const detected = detectedOutput.kind;
     state.outputName = detectedOutput.name;
+    state.hasCommunicationHeadset = Boolean(detectedOutput.hasCommunicationHeadset);
     // Мобільні браузери ховають назви виходів: звук і так іде на вихід, який обрала ОС
     state.output = detected !== 'unknown' ? detected
       : state.micPermission === 'granted' ? 'ready'
@@ -1718,44 +1746,178 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   // Гарнітуру відключено: гасимо звук і вібрацію, зупиняємо мікрофон (щоб Android не підставив мікрофон телефону) і чекаємо
-  async function pauseForHeadset(s) {
+  async function pauseForHeadset(s, hint) {
     s.isWaitingHeadset = true;
     s.fallbacks += 1;
-    const old = state.engine;
-    state.engine = null;
-    if (old) {
-      old.setMuted(true);
-      await old.stop();
+    await delay(HEADSET_REASON_WAIT_MS);
+    markHeadsetLoss(s, hint);
+    state.isRestarting = true;
+    try {
+      // Сесія не зупиняється: тимчасово слухає мікрофон телефону, але звук і вібрація заглушені (звук у динамік телефону не йде ніколи)
+      const old = state.engine;
+      state.engine = null;
+      if (old) {
+        old.setMuted(true);
+        await old.stop();
+      }
+      releaseHeadsetMic();
+      setSessionStatus(`Гарнітури немає: слухаю мікрофон телефону без звуку, шукаю гарнітуру кожні ${HEADSET_RETRY_MS / 1000} с`);
+      showAlert('Гарнітуру втрачено. Звуку немає: сесія слухає мікрофон телефону й шукає гарнітуру.');
+      if (await startPhoneEngine(s, true)) logEvent('Слухаю мікрофон телефону без звуку й вібрації, поки гарнітури немає');
+    } finally {
+      state.isRestarting = false;
+      syncBackgroundService();
     }
-    releaseHeadsetMic();
-    setSessionStatus('Очікую повернення Bluetooth-гарнітури…');
-    showAlert('Гарнітуру відключено. Звуку немає, сесія чекає на її повернення.');
-    logEvent('Гарнітуру відключено — звук, вібрацію й мікрофон вимкнено, сесія чекає на гарнітуру');
   }
 
   // Гарнітура повернулась: заново підключаємо її мікрофон і запускаємо двигун; збій повторюється через HEADSET_RETRY_MS
   async function resumeFromHeadset(s) {
     state.isRestarting = true;
+    const wasWaiting = s.isWaitingHeadset;
+    const old = state.engine;
+    state.engine = null;
     try {
+      if (old) await old.stop();
+      state.isPhoneFallback = false;
       const engine = buildEngine(false);
-      await engine.start();
-      if (state.session !== s) {
+      await startEngineWithTimeout(engine);
+      // Після повної втрати достатньо повернення виходу; якщо гарнітура була лише замінена мікрофоном телефону, потрібен саме її мікрофон
+      const isMicRestored = wasWaiting || state.micMode === 'phone' || Boolean(state.device && state.device.source === 'headset');
+      if (state.session !== s || !isMicRestored) {
         await engine.stop();
+        if (state.session === s) throw new Error('мікрофон гарнітури не підтвердився');
         return;
       }
       state.engine = engine;
       s.isWaitingHeadset = false;
+      s.restoreFailures = 0;
       setSessionStatus('Слухаю');
       refreshMicWarning();
+      markHeadsetRestored(s);
       logEvent('Гарнітуру повернено — мікрофон і звук знову увімкнено');
       syncBackgroundService();
-      setTimeout(refreshOutput, 0);
     } catch (err) {
       console.error('VIO: не вдалося відновити роботу з гарнітурою', err);
-      logEvent(`Гарнітуру виявлено, але мікрофон не підключився: ${err.message}. Повторна спроба через ${HEADSET_RETRY_MS / 1000} с`);
-      setTimeout(refreshOutput, HEADSET_RETRY_MS);
+      s.restoreFailures += 1;
+      if (s.restoreFailures <= MAX_LOGGED_RESTORE_FAILURES) {
+        logEvent(`Гарнітуру виявлено, але мікрофон не підключився: ${err.message}. Повторна спроба через ${HEADSET_RETRY_MS / 1000} с`);
+      }
+      if (state.session === s) await startPhoneEngine(s, wasWaiting);
     } finally {
       state.isRestarting = false;
+      syncBackgroundService();
+    }
+  }
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Подія гарнітури від Android (ACL, SCO, зникнення зі списку, заряд): запам'ятовується, щоб назвати причину втрати
+  function rememberHeadsetEvent(event) {
+    if (Number.isFinite(event.battery) && event.battery >= 0) state.headsetBattery = event.battery;
+    state.headsetEvents = [...state.headsetEvents, event].slice(-MAX_HEADSET_EVENTS);
+    const isBatteryEvent = event.type === 'BATTERY_LEVEL';
+    if (isBatteryEvent && event.battery > LOW_BATTERY_PERCENT) return;
+    const battery = event.battery >= 0 ? `, заряд ${event.battery}%` : '';
+    const name = event.name ? ` «${event.name}»` : '';
+    logEvent(`Гарнітура${name}: ${event.type}${battery}`);
+  }
+
+  // Причина втрати гарнітури за подіями Android за останні LOSS_EVENT_WINDOW_MS; hint — що відомо з боку застосунку
+  function describeLossReason(hint) {
+    const since = Date.now() - LOSS_EVENT_WINDOW_MS;
+    const recent = state.headsetEvents.filter((event) => event.at >= since);
+    const types = new Set(recent.map((event) => event.type));
+    const acl = [...recent].reverse().find((event) => event.type === 'ACL_DISCONNECTED');
+    const hasBattery = state.headsetBattery !== null;
+    const parts = [];
+    if (hasBattery && state.headsetBattery <= LOW_BATTERY_PERCENT) parts.push(`низький заряд (${state.headsetBattery}%)`);
+    if (acl) parts.push(acl.reasonCode >= 0 ? `ACL_DISCONNECTED (код ${acl.reasonCode})` : 'ACL_DISCONNECTED');
+    if (types.has('SCO_DISCONNECTED')) parts.push('SCO_DISCONNECTED');
+    if (types.has('REMOVED_FROM_LIST')) parts.push('зникла зі списку комунікаційних пристроїв');
+    if (hint) parts.push(hint);
+    if (hasBattery && state.headsetBattery > LOW_BATTERY_PERCENT) parts.push(`заряд ${state.headsetBattery}%`);
+    return parts.length > 0 ? parts.join('; ') : 'причина невідома: Android не надіслав подій';
+  }
+
+  function formatSpan(ms) {
+    const total = Math.round(ms / 1000);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    return [hours > 0 ? `${hours} год` : '', hours > 0 || minutes > 0 ? `${minutes} хв` : '', `${total % 60} с`].filter(Boolean).join(' ');
+  }
+
+  // Початок втрати гарнітури (один раз на випадок): час і причина йдуть у журнал і потім у підсумок
+  function markHeadsetLoss(s, hint) {
+    if (s.lossStartedAt) return;
+    s.lossStartedAt = Date.now();
+    s.lossReason = describeLossReason(hint);
+    s.lossCount += 1;
+    s.restoreFailures = 0;
+    s.pollCount = 0;
+    logEvent(`Гарнітуру втрачено: ${s.lossReason}`);
+  }
+
+  function markHeadsetRestored(s) {
+    if (!s.lossStartedAt) return;
+    const lostMs = Date.now() - s.lossStartedAt;
+    s.headsetlessMs += lostMs;
+    logEvent(`Гарнітуру відновлено о ${new Date().toLocaleTimeString('uk-UA')}: без неї було ${formatSpan(lostMs)}, причина втрати: ${s.lossReason}`);
+    s.lossStartedAt = null;
+    s.lossReason = '';
+  }
+
+  // Запускає мікрофон телефону й кладе двигун у state.engine; isMuted гарантує, що звук і вібрація не підуть у динамік телефону. Викликач тримає state.isRestarting
+  async function startPhoneEngine(s, isMuted) {
+    state.isPhoneFallback = true;
+    const engine = buildEngine(false, isMuted);
+    try {
+      await startEngineWithTimeout(engine);
+    } catch (err) {
+      console.error('VIO: мікрофон телефону не запустився', err);
+      logEvent(`Мікрофон телефону не запустився: ${err.message}. Повторна спроба через ${HEADSET_RETRY_MS / 1000} с`);
+      return false;
+    }
+    if (state.session !== s) {
+      await engine.stop();
+      return false;
+    }
+    state.engine = engine;
+    return true;
+  }
+
+  // Мікрофон гарнітури шукаємо, поки її немає або поки сесія слухає телефон замість гарнітури (режим «Телефон» цього не потребує)
+  function needsHeadsetSearch(s) {
+    if (!s || s.mode !== 'night') return false;
+    if (s.isWaitingHeadset) return true;
+    return state.micMode !== 'phone' && Boolean(state.device) && state.device.source === 'phone';
+  }
+
+  // Раз на HEADSET_RETRY_MS: піднімає слухання, якщо воно обірвалось, і шукає гарнітуру. Після MAX_FAST_RESTORE_ATTEMPTS невдач спроби рідшають, щоб не рвати слухання
+  async function pollHeadset() {
+    const s = state.session;
+    if (!needsHeadsetSearch(s) || state.isStarting || state.isRestarting) return;
+    s.pollCount += 1;
+    const isSlowPoll = s.restoreFailures >= MAX_FAST_RESTORE_ATTEMPTS && s.pollCount % SLOW_RESTORE_EVERY_POLLS !== 0;
+    if (isSlowPoll) return;
+    const wasWaiting = s.isWaitingHeadset;
+    if (wasWaiting) await restartPhoneListening(s);
+    await refreshOutput();
+    if (state.session !== s || wasWaiting || s.isWaitingHeadset || state.isRestarting) return;
+    if (needsHeadsetSearch(s) && state.hasCommunicationHeadset) await resumeFromHeadset(s);
+  }
+
+  // Без гарнітури мікрофон телефону міг обірватись: піднімаємо його знову, щоб слухання не припинялось
+  async function restartPhoneListening(s) {
+    if (state.isRestarting || (state.engine && state.engine.isMicLive())) return;
+    state.isRestarting = true;
+    try {
+      const old = state.engine;
+      state.engine = null;
+      if (old) await old.stop();
+      if (await startPhoneEngine(s, true)) logEvent('Мікрофон телефону піднято знову: слухання без гарнітури відновлено');
+    } finally {
+      state.isRestarting = false;
+      syncBackgroundService();
     }
   }
 
@@ -1835,6 +1997,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     if (state.isRestarting || state.session !== s) return;
     state.isRestarting = true;
     state.isPhoneFallback = true;
+    markHeadsetLoss(s, reason);
     logEvent(`Мікрофон гарнітури недоступний (${reason}) — переходжу на мікрофон телефону`);
     const old = state.engine;
     state.engine = null;
@@ -1880,8 +2043,55 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       state.pendingEvents.push({ t: Date.now(), text });
       return;
     }
-    if (!s || s.events.length >= MAX_SESSION_EVENTS) return;
-    s.events.push({ t: Date.now(), text });
+    if (!s) return;
+    appendSessionEvent(s, text);
+  }
+
+  // Рядок журналу сесії: у звіт застосунку (до MAX_SESSION_EVENTS) і без обмежень у буфер файлу на телефоні
+  function appendSessionEvent(s, text) {
+    const event = { t: Date.now(), text };
+    if (s.events.length < MAX_SESSION_EVENTS) s.events.push(event);
+    s.fileBuffer.push(formatFileLine(event));
+  }
+
+  function formatFileLine(event) {
+    return `${new Date(event.t).toLocaleString('uk-UA')} ${event.text}`;
+  }
+
+  // Журнал ночі пишеться у файл у «Завантаженнях»: відкриваємо його на старті сесії, дописуємо кожні LIVE_SAVE_EVERY_S с і в кінці
+  async function openSessionLog(s) {
+    if (!NativeAudioRoute) return;
+    const started = new Date(s.start);
+    const pad = (n) => String(n).padStart(2, '0');
+    const fileName = `${LOG_FILE_PREFIX}${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())}-${pad(started.getHours())}${pad(started.getMinutes())}.txt`;
+    try {
+      const result = await NativeAudioRoute.openLog({ fileName });
+      s.isLogOpen = true;
+      logEvent(`Журнал сесії пишеться у файл: ${result.path}`);
+    } catch (err) {
+      console.error('VIO: не вдалося створити файл журналу', err);
+      logEvent(`Файл журналу не створено: ${err.message}. Журнал лишається лише у вкладці «Звіти»`);
+    }
+  }
+
+  async function flushSessionLog(s) {
+    if (!s.isLogOpen || s.isLogFlushing || s.fileBuffer.length === 0) return;
+    s.isLogFlushing = true;
+    const lines = s.fileBuffer.splice(0);
+    try {
+      await NativeAudioRoute.appendLog({ text: `${lines.join('\n')}\n` });
+    } catch (err) {
+      console.error('VIO: не вдалося дописати файл журналу', err);
+      s.fileBuffer.unshift(...lines);
+    } finally {
+      s.isLogFlushing = false;
+    }
+  }
+
+  // Після зупинки сесії дописує залишок буфера; якщо попередній запис ще триває, чекає на нього
+  async function closeSessionLog(s) {
+    while (s.isLogFlushing) await delay(LOG_FLUSH_WAIT_MS);
+    await flushSessionLog(s);
   }
 
   function setSessionStatus(text) {
@@ -1907,6 +2117,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     }
     if (canFallbackToPhone()) {
       await switchToPhoneMic(s, 'доріжка мікрофона гарнітури обірвалась');
+      return;
+    }
+    if (s.mode === 'night' && state.micMode === 'headset') {
+      await pauseForHeadset(s, 'доріжка мікрофона гарнітури обірвалась (розрив SCO)');
       return;
     }
     logEvent('Мікрофон втрачено — сесію зупинено');
@@ -2000,8 +2214,8 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     logEvent('Аудіоядро не працює — фонове сповіщення знято');
   }
 
-  function buildEngine(isRetry) {
-    return createAcousticEngine({
+  function buildEngine(isRetry, isMuted = false) {
+    const engine = createAcousticEngine({
       prepareMic: () => prepareMicSource(isRetry),
       onLog: logEvent,
       onStatus: setSessionStatus,
@@ -2010,9 +2224,12 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       onSilent: restartEngine,
       onSample: handleSample,
       onMuted: handleMicMuted,
+      onEpisode: handleEpisode,
       getTuning: () => ({ wakeRms: activeWakeRms() }),
       classLabel: className
     });
+    if (isMuted) engine.setMuted(true);
+    return engine;
   }
 
   // Мертвий аудіопотік: зупиняємо доріжки мікрофона й створюємо двигун заново, що «пересмикує» потік у WebView і гарнітуру
@@ -2035,7 +2252,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     state.engine = null;
     try {
       if (old) await old.stop();
-      const engine = buildEngine(true);
+      const engine = buildEngine(true, s.isWaitingHeadset);
       await engine.start();
       if (state.session !== s) {
         await engine.stop();
@@ -2118,12 +2335,16 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const startEvents = state.pendingEvents;
     state.pendingEvents = [];
     state.session = {
-      mode, start: Date.now(), seconds: 0, status: '', events: startEvents, fallbacks: 0, isWaitingHeadset: false, diagRows: 0
+      mode, start: Date.now(), seconds: 0, status: '', events: startEvents, fallbacks: 0, isWaitingHeadset: false,
+      fileBuffer: startEvents.map(formatFileLine), isLogOpen: false, isLogFlushing: false, minute: null, stats: createStats(),
+      lossStartedAt: null, lossReason: '', lossCount: 0, headsetlessMs: 0, restoreFailures: 0, pollCount: 0
     };
     logEvent(mode === 'night' ? 'Нічну сесію розпочато (вихід: Bluetooth-гарнітура)' : 'Денну сесію розпочато');
     state.tickId = setInterval(tick, 1000);
     renderSession();
     if (mode === 'night') {
+      openSessionLog(state.session);
+      state.headsetPollId = setInterval(pollHeadset, HEADSET_RETRY_MS);
       armMask();
       acquireWakeLock();
       syncBackgroundService();
@@ -2134,7 +2355,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const s = state.session;
     if (!s) return;
     clearInterval(state.tickId);
+    clearInterval(state.headsetPollId);
+    state.headsetPollId = null;
     logEvent(`Сесію завершено (${endedBy === 'user' ? 'користувачем' : 'Fail-Safe'})`);
+    if (s.mode === 'night') writeSessionSummary(s);
     state.session = null;
     if (state.engine) {
       state.engine.stop();
@@ -2149,6 +2373,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       mode: s.mode, start: s.start, seconds, endedBy, events: s.events, fallbacks: s.fallbacks
     }]);
     clearLiveSession();
+    closeSessionLog(s);
     disarmMask();
     renderSession();
     renderReports();
@@ -2158,7 +2383,16 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     const s = state.session;
     if (!s) return;
     s.seconds = Math.round((Date.now() - s.start) / 1000);
-    if (s.seconds % LIVE_SAVE_EVERY_S === 0) saveLiveSession();
+    if (s.minute && s.minute.start !== currentMinuteStart()) flushMinute(s);
+    if (s.seconds % LIVE_SAVE_EVERY_S === 0) {
+      saveLiveSession();
+      flushSessionLog(s);
+    }
+    // Під чорною маскою видно лише годинник: решту екрана не перемальовуємо, це економить батарею
+    if ($('mask').getAttribute('aria-hidden') === 'false') {
+      $('mask-clock').textContent = formatClock(s.seconds);
+      return;
+    }
     renderSession();
   }
 
@@ -2234,7 +2468,10 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
   }
 
   function onUserActivity() {
-    if ($('mask').getAttribute('aria-hidden') === 'false') hideMask();
+    if ($('mask').getAttribute('aria-hidden') === 'false') {
+      hideMask();
+      renderSession();
+    }
     armMask();
   }
 
@@ -2551,21 +2788,90 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
     return `Секунда: RMS ${sample.rms.toFixed(4)}, Snoring ${sample.snoring.toFixed(2)}, Speech ${sample.speech.toFixed(2)}, топ-3: ${top}, заборона Speech: ${sample.isSpeech ? 'так' : 'ні'}`;
   }
 
-  // Рядок діагностики секунди: найстаріші рядки діагностики витісняються, щоб журнал не розростався понад MAX_DIAG_ROWS
-  function logDiagRow(text) {
+  function createStats() {
+    return {
+      classified: 0, skipped: 0, snoreSeconds: 0, speechBlocked: 0,
+      confirmed: { [VioCore.RULE_PAIR]: 0, [VioCore.RULE_STRONG]: 0, [VioCore.RULE_FAST]: 0 },
+      mutedConfirmed: 0, reflexes: 0, reflexesStage2: 0, tests: 0
+    };
+  }
+
+  function currentMinuteStart() {
+    return Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS;
+  }
+
+  // Секунди зі Snoring вище SNORE_ROW_MIN_SCORE пишуться повністю, без обмеження кількості
+  function logSnoreRow(text) {
     const s = state.session;
     if (!s) return;
     console.info(`[VIO] ${text}`);
-    if (s.diagRows >= MAX_DIAG_ROWS) {
-      const oldest = s.events.findIndex((event) => event.isDiag);
-      if (oldest >= 0) s.events.splice(oldest, 1);
-      s.diagRows -= 1;
-    }
-    s.events.push({ t: Date.now(), text, isDiag: true });
-    s.diagRows += 1;
+    appendSessionEvent(s, text);
   }
 
-  // Кожна секунда, де нейромережа працювала і RMS вищий за DIAG_MIN_RMS, йде в журнал сесії без фільтра по Snoring
+  // Решта секунд (Snoring не вище SNORE_ROW_MIN_SCORE) збирається в одну хвилину й пишеться одним рядком
+  function addToMinute(s, sample) {
+    const start = currentMinuteStart();
+    if (s.minute && s.minute.start !== start) flushMinute(s);
+    const minute = s.minute || { start, seconds: 0, skipped: 0, rmsSum: 0, rmsMax: 0, snoringMax: 0, speechSeconds: 0 };
+    minute.seconds += 1;
+    minute.skipped += sample.isSkipped ? 1 : 0;
+    minute.rmsSum += sample.rms;
+    minute.rmsMax = Math.max(minute.rmsMax, sample.rms);
+    minute.snoringMax = Math.max(minute.snoringMax, sample.snoring);
+    minute.speechSeconds += sample.isSpeech ? 1 : 0;
+    s.minute = minute;
+  }
+
+  function flushMinute(s) {
+    const minute = s.minute;
+    s.minute = null;
+    if (!minute) return;
+    const clock = new Date(minute.start).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+    const average = (minute.rmsSum / minute.seconds).toFixed(4);
+    appendSessionEvent(s, `Хвилина ${clock}: секунд зі Snoring до ${SNORE_ROW_MIN_SCORE.toFixed(2)} — ${minute.seconds} (нейромережу пропущено в ${minute.skipped}), макс Snoring ${minute.snoringMax.toFixed(2)}, середній RMS ${average}, макс RMS ${minute.rmsMax.toFixed(4)}, секунд зі Speech ${minute.speechSeconds}`);
+  }
+
+  // Подія епізоду від двигуна: підсумок сесії рахує підтвердження, реальні рефлекси й підтвердження без звуку
+  function handleEpisode(event) {
+    const s = state.session;
+    if (!s) return;
+    const stats = s.stats;
+    if (event.rule === RULE_TEST) {
+      if (event.phase === 'start') stats.tests += 1;
+      return;
+    }
+    if (event.phase === 'start') {
+      stats.confirmed[event.rule] += 1;
+      if (event.isMuted) stats.mutedConfirmed += 1;
+      else stats.reflexes += 1;
+    } else if (event.phase === 'stage2' && !event.isMuted) {
+      stats.reflexesStage2 += 1;
+    }
+  }
+
+  // Підсумок у кінці сесії: підтвердження, реальні рефлекси, час без гарнітури
+  function writeSessionSummary(s) {
+    flushMinute(s);
+    const stats = s.stats;
+    const confirmed = stats.confirmed;
+    const total = confirmed[VioCore.RULE_PAIR] + confirmed[VioCore.RULE_STRONG] + confirmed[VioCore.RULE_FAST];
+    const ongoingMs = s.lossStartedAt ? Date.now() - s.lossStartedAt : 0;
+    if (s.lossStartedAt) {
+      logEvent(`Гарнітуру не відновлено до кінця сесії: без неї ${formatSpan(ongoingMs)}, причина втрати: ${s.lossReason}`);
+    }
+    const headsetlessMs = s.headsetlessMs + ongoingMs;
+    [
+      '=== Підсумок сесії ===',
+      `Підтверджень хропіння: ${total} (пара секунд над порогом: ${confirmed[VioCore.RULE_PAIR]}, одна сильна секунда: ${confirmed[VioCore.RULE_STRONG]}, швидкий тригер: ${confirmed[VioCore.RULE_FAST]})`,
+      `Реальних рефлексів (звук і вібрація пішли в гарнітуру): ${stats.reflexes}, з них дійшло до гулу: ${stats.reflexesStage2}`,
+      `Підтверджень без звуку (гарнітури не було): ${stats.mutedConfirmed}`,
+      `Секунд зі Snoring понад ${SNORE_ROW_MIN_SCORE.toFixed(2)}: ${stats.snoreSeconds}, з них розмову відсіяно: ${stats.speechBlocked}`,
+      `Нейромережа проаналізувала ${stats.classified - stats.skipped} с, пропущено в тиші ${stats.skipped} с`,
+      `Час без гарнітури: ${formatSpan(headsetlessMs)}, випадків втрати: ${s.lossCount}`
+    ].forEach((line) => logEvent(line));
+  }
+
+  // Кожна секунда нічної сесії, коли нейромережа працювала: зі Snoring понад SNORE_ROW_MIN_SCORE — окремим рядком, решта — у хвилинний рядок
   function handleSample(sample) {
     const calibration = state.calibration;
     if (calibration) {
@@ -2574,8 +2880,17 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       logEvent(formatSample(sample, stage ? stage.label : ''));
       return;
     }
-    if (!sample.isAwake || sample.rms <= DIAG_MIN_RMS) return;
-    logDiagRow(formatSessionSecond(sample));
+    const s = state.session;
+    if (!s || !sample.isAwake) return;
+    s.stats.classified += 1;
+    s.stats.skipped += sample.isSkipped ? 1 : 0;
+    if (sample.snoring <= SNORE_ROW_MIN_SCORE) {
+      addToMinute(s, sample);
+      return;
+    }
+    s.stats.snoreSeconds += 1;
+    s.stats.speechBlocked += sample.isSpeech ? 1 : 0;
+    logSnoreRow(formatSessionSecond(sample));
   }
 
   function averageOf(values) {
@@ -2808,6 +3123,7 @@ function createAcousticEngine({ prepareMic, onLog, onStatus, onLost, onRunningCh
       navigator.mediaDevices.addEventListener('devicechange', refreshOutput);
     }
     if (NativeAudioRoute) NativeAudioRoute.addListener('routeChanged', () => refreshOutput());
+    if (NativeAudioRoute) NativeAudioRoute.addListener('headsetEvent', rememberHeadsetEvent);
 
     setTab('night');
     renderSession();

@@ -155,13 +155,20 @@ async function buildTrace(signal, env, cache) {
     const tick = { t, lastRms, isScored: false, snoring: 0, top: [] };
     if (aiBuffer.isFull() && ai.isAwake) {
       const window = aiBuffer.latestWindow();
-      const key = windowHash(window);
-      if (!cache.has(key)) cache.set(key, await scoreWindow(env.model, window));
-      const scores = cache.get(key);
       tick.isScored = true;
-      tick.snoring = scores[C.AI_SNORING_CLASS];
-      tick.speech = scores[C.AI_SPEECH_CLASS];
-      tick.top = topClasses(scores, C.DIAG_TOP_CLASSES);
+      // Майже беззвучне вікно нейромережа не аналізує (як у двигуні): секунда без Snoring і без Speech
+      tick.isSkipped = Core.isNearSilence(C, window);
+      if (tick.isSkipped) {
+        tick.speech = 0;
+        tick.top = [];
+      } else {
+        const key = windowHash(window);
+        if (!cache.has(key)) cache.set(key, await scoreWindow(env.model, window));
+        const scores = cache.get(key);
+        tick.snoring = scores[C.AI_SNORING_CLASS];
+        tick.speech = scores[C.AI_SPEECH_CLASS];
+        tick.top = topClasses(scores, C.DIAG_TOP_CLASSES);
+      }
     }
     tick.isFull = aiBuffer.isFull();
     const from = Math.max(0, end - C.FFT_SIZE);
@@ -194,7 +201,8 @@ function simulateRule(trace, env, rule) {
     if (tick.isFull && !tick.isScored) {
       Core.idleScore(ai, C, now);
     } else if (tick.isScored) {
-      const verdict = Core.registerScore(ai, C, {
+      const register = tick.isSkipped ? Core.registerSilence : Core.registerScore;
+      const verdict = register(ai, C, {
         now, wall: FAKE_DAY_START_MS + now, snoring: tick.snoring, speech: tick.speech, rms: tick.lastRms, top: tick.top,
         threshold: env.threshold, classLabel: env.classLabel
       });
@@ -223,8 +231,10 @@ async function runTrial(label, category, signal, env, cache) {
   const trace = await buildTrace(signal, env, cache);
   const summary = summarizeTrace(trace, env.classLabel);
   const rules = RULES.map((rule) => simulateRule(trace, env, rule));
+  const scoredSeconds = trace.filter((tick) => tick.isScored).length;
+  const skippedSeconds = trace.filter((tick) => tick.isSkipped).length;
   const speechSeconds = trace.filter((tick) => tick.isScored && tick.snoring > env.C.AI_HOLD_SCORE && Core.isSpeechSecond(env.C, tick.speech, tick.top)).length;
-  return { label, category, ...summary, rules, speechSeconds };
+  return { label, category, ...summary, rules, speechSeconds, scoredSeconds, skippedSeconds };
 }
 
 function listFiles(category) {
@@ -272,6 +282,7 @@ function summaryLines(title, positives, negatives, negativeClasses) {
   });
   const blockedPositives = positives.filter((trial) => trial.speechSeconds > 0).length;
   const blockedNegatives = negatives.filter((trial) => trial.speechSeconds > 0).length;
+  lines.push(`Нейромережу пропущено в тиші: ${[...positives, ...negatives].reduce((sum, trial) => sum + trial.skippedSeconds, 0)} з ${[...positives, ...negatives].reduce((sum, trial) => sum + trial.scoredSeconds, 0)} секунд`);
   lines.push(`Заборона Speech відсіяла секунди зі Snoring > 0.10: у ${blockedPositives} з ${positives.length} зразків хропіння, у ${blockedNegatives} з ${negatives.length} негативів`);
   return lines;
 }

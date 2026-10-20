@@ -7,6 +7,11 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.VioCore = api;
 })(typeof self !== 'undefined' ? self : globalThis, () => {
+  // Яке правило підтвердило хропіння: пара секунд над порогом, одна сильна секунда, швидкий тригер
+  const RULE_PAIR = 'pair';
+  const RULE_STRONG = 'strong';
+  const RULE_FAST = 'fast';
+
   // Кільцевий буфер для YAMNet: знижує частоту дискретизації до AI_SAMPLE_RATE усередненням і віддає останнє вікно
   function createAiBuffer(C, inputRate) {
     const data = new Float32Array(C.AI_WINDOW_SAMPLES);
@@ -49,7 +54,7 @@
   // Початковий стан нейромережі в сесії
   function createAiState() {
     return {
-      isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreHits: [], lastWeakAt: 0, fastHits: 0,
+      isReady: false, isBusy: false, isSnore: false, snoreReason: '', snoreRule: '', snoreHits: [], lastWeakAt: 0, fastHits: 0,
       isAwake: false, belowSince: null, updatedAt: 0, forcedUntil: 0
     };
   }
@@ -86,6 +91,13 @@
 
   function describeStrongHit(hit, C, classLabel) {
     return `причина: модель — підтвердження однією сильною секундою (Snoring від ${C.AI_SINGLE_SCORE.toFixed(2)}): ${formatHit(hit, classLabel)}`;
+  }
+
+  // Вікно звуку майже беззвучне (цифровий нуль або шум нижче AI_SKIP_RMS): нейромережа тут нічого не знайде, і її запуск пропускається
+  function isNearSilence(C, window) {
+    let sum = 0;
+    for (let i = 0; i < window.length; i++) sum += window[i] * window[i];
+    return Math.sqrt(sum / window.length) < C.AI_SKIP_RMS;
   }
 
   // Нейромережа спить, але сигнал ще може триматися: він гасне лише після AI_HOLD_QUIET_MS без секунди зі Snoring понад AI_HOLD_SCORE
@@ -125,14 +137,21 @@
     ai.isSnore = isScoreConfirmed || isFastConfirmed || isHeld;
     if (isScoreConfirmed) {
       const isPairConfirmed = isAboveThreshold && ai.snoreHits.length >= C.AI_CONFIRM_HITS;
+      ai.snoreRule = isPairConfirmed ? RULE_PAIR : RULE_STRONG;
       ai.snoreReason = isPairConfirmed
         ? describeConfirmation(ai.snoreHits.slice(-C.AI_CONFIRM_HITS), C, threshold, classLabel)
         : describeStrongHit(ai.snoreHits[ai.snoreHits.length - 1], C, classLabel);
       ai.snoreHits = [];
     } else if (isFastConfirmed) {
+      ai.snoreRule = RULE_FAST;
       ai.snoreReason = fastReason;
     }
     return { isFastConfirmed, fastReason, isSpeech, isSpeechBlocked: isSpeech && input.snoring > C.AI_HOLD_SCORE };
+  }
+
+  // Секунда, яку нейромережа не аналізувала через майже повну тишу: правила бачать її як секунду без Snoring і без Speech
+  function registerSilence(ai, C, input) {
+    return registerScore(ai, C, { ...input, snoring: 0, speech: 0, top: [] });
   }
 
   function canStartEpisode(st, now) {
@@ -151,5 +170,5 @@
     return 'інженерний тест';
   }
 
-  return { scaleWake, isSpeechSecond, createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
+  return { RULE_PAIR, RULE_STRONG, RULE_FAST, scaleWake, isSpeechSecond, isNearSilence, registerSilence, createAiBuffer, createAiState, updateAiWakefulness, idleScore, registerScore, canStartEpisode, evaluateTriggers };
 });

@@ -1,6 +1,7 @@
 package com.vio.app;
 
 import android.Manifest;
+import android.bluetooth.BluetoothDevice;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -15,6 +16,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
@@ -26,7 +28,9 @@ import com.getcapacitor.annotation.PermissionCallback;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -47,8 +51,19 @@ public class AudioRoutePlugin extends Plugin {
     private static final String REASON_NO_DEVICE = "no-device";
     private static final String REASON_NOT_CONFIRMED = "not-confirmed";
 
+    private static final String EVENT_HEADSET = "headsetEvent";
+    private static final String ACTION_BATTERY_LEVEL_CHANGED = "android.bluetooth.device.action.BATTERY_LEVEL_CHANGED";
+    private static final String EXTRA_BATTERY_LEVEL = "android.bluetooth.device.extra.BATTERY_LEVEL";
+    private static final String EXTRA_DISCONNECT_REASON = "android.bluetooth.device.extra.REASON";
+    private static final int UNKNOWN_VALUE = -1;
+    private static final String LOG_DIRECTORY = Environment.DIRECTORY_DOWNLOADS;
+
     private AudioManager audioManager;
     private AudioDeviceCallback deviceCallback;
+    private BroadcastReceiver headsetReceiver;
+    // Останній відомий заряд гарнітури за адресою: на момент розриву зв'язку система вже може його не віддавати
+    private final Map<String, Integer> lastBatteryByAddress = new HashMap<>();
+    private Uri logUri;
 
     @Override
     public void load() {
@@ -62,14 +77,155 @@ public class AudioRoutePlugin extends Plugin {
             @Override
             public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
                 notifyListeners(EVENT_ROUTE_CHANGED, currentRoute());
+                if (containsHeadset(removedDevices)) {
+                    notifyListeners(EVENT_HEADSET, headsetEvent("REMOVED_FROM_LIST", null, UNKNOWN_VALUE));
+                }
             }
         };
         audioManager.registerAudioDeviceCallback(deviceCallback, null);
+        registerHeadsetReceiver();
     }
 
     @Override
     protected void handleOnDestroy() {
         audioManager.unregisterAudioDeviceCallback(deviceCallback);
+        getContext().unregisterReceiver(headsetReceiver);
+    }
+
+    /* ---------- Події гарнітури: причини втрати ---------- */
+
+    private boolean containsHeadset(AudioDeviceInfo[] devices) {
+        for (AudioDeviceInfo device : devices) {
+            if (isHeadsetCommunicationType(device.getType())) return true;
+        }
+        return false;
+    }
+
+    // ACL-розрив, зміна стану SCO і заряд гарнітури: JS бачить, чому саме зникла гарнітура
+    private void registerHeadsetReceiver() {
+        headsetReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                handleHeadsetBroadcast(intent);
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+        filter.addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
+        filter.addAction(ACTION_BATTERY_LEVEL_CHANGED);
+        ContextCompat.registerReceiver(getContext(), headsetReceiver, filter, ContextCompat.RECEIVER_EXPORTED);
+    }
+
+    private void handleHeadsetBroadcast(Intent intent) {
+        String action = intent.getAction();
+        if (action == null) return;
+        BluetoothDevice device = deviceFrom(intent);
+        if (ACTION_BATTERY_LEVEL_CHANGED.equals(action)) {
+            int level = intent.getIntExtra(EXTRA_BATTERY_LEVEL, UNKNOWN_VALUE);
+            if (device != null && level >= 0) lastBatteryByAddress.put(device.getAddress(), level);
+            notifyListeners(EVENT_HEADSET, headsetEvent("BATTERY_LEVEL", device, level));
+            return;
+        }
+        if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
+            JSObject event = headsetEvent("ACL_DISCONNECTED", device, batteryOf(device));
+            event.put("reasonCode", intent.getIntExtra(EXTRA_DISCONNECT_REASON, UNKNOWN_VALUE));
+            notifyListeners(EVENT_HEADSET, event);
+            return;
+        }
+        if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
+            notifyListeners(EVENT_HEADSET, headsetEvent("ACL_CONNECTED", device, batteryOf(device)));
+            return;
+        }
+        int scoState = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR);
+        if (scoState == AudioManager.SCO_AUDIO_STATE_DISCONNECTED) {
+            notifyListeners(EVENT_HEADSET, headsetEvent("SCO_DISCONNECTED", null, UNKNOWN_VALUE));
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private BluetoothDevice deviceFrom(Intent intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+        }
+        return intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+    }
+
+    private JSObject headsetEvent(String type, BluetoothDevice device, int battery) {
+        JSObject event = new JSObject();
+        event.put("type", type);
+        event.put("name", deviceName(device));
+        event.put("battery", battery);
+        event.put("at", System.currentTimeMillis());
+        return event;
+    }
+
+    private String deviceName(BluetoothDevice device) {
+        if (device == null) return "";
+        try {
+            String name = device.getName();
+            return name == null ? "" : name;
+        } catch (SecurityException err) {
+            return "";
+        }
+    }
+
+    // Заряд гарнітури у відсотках або UNKNOWN_VALUE: спершу останнє значення із системної події, потім прихований метод системи
+    private int batteryOf(BluetoothDevice device) {
+        if (device == null) return UNKNOWN_VALUE;
+        Integer known = lastBatteryByAddress.get(device.getAddress());
+        if (known != null) return known;
+        try {
+            Object level = BluetoothDevice.class.getMethod("getBatteryLevel").invoke(device);
+            return level instanceof Integer && (Integer) level >= 0 ? (Integer) level : UNKNOWN_VALUE;
+        } catch (ReflectiveOperationException | RuntimeException err) {
+            return UNKNOWN_VALUE;
+        }
+    }
+
+    /* ---------- Журнал сесії у файлі в «Завантаженнях» ---------- */
+
+    // Створює файл журналу в «Завантаженнях»; наступні appendLog дописують у нього
+    @PluginMethod
+    public void openLog(PluginCall call) {
+        String fileName = call.getString("fileName");
+        if (fileName == null || fileName.isEmpty()) {
+            call.reject("Немає імені файлу журналу");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            call.reject("Журнал у файлі потребує Android 10 або новішого");
+            return;
+        }
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName.replaceAll("[\\\\/]", "_"));
+        values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+        values.put(MediaStore.Downloads.RELATIVE_PATH, LOG_DIRECTORY);
+        logUri = getContext().getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (logUri == null) {
+            call.reject("Система не створила файл журналу у «Завантаженнях»");
+            return;
+        }
+        JSObject result = new JSObject();
+        result.put("path", LOG_DIRECTORY + "/" + fileName);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void appendLog(PluginCall call) {
+        String text = call.getString("text");
+        if (logUri == null || text == null) {
+            call.reject("Журнал не відкрито або немає тексту");
+            return;
+        }
+        try (OutputStream out = getContext().getContentResolver().openOutputStream(logUri, "wa")) {
+            if (out == null) throw new IOException("не вдалося відкрити файл журналу");
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            call.reject("Не вдалося дописати журнал: " + e.getMessage());
+            return;
+        }
+        call.resolve();
     }
 
     @PluginMethod
@@ -342,7 +498,14 @@ public class AudioRoutePlugin extends Plugin {
         JSObject route = new JSObject();
         route.put("kind", isBluetooth ? KIND_BLUETOOTH : KIND_NONE);
         route.put("name", bluetoothOutputName());
+        route.put("hasCommunicationHeadset", hasCommunicationHeadset());
         return route;
+    }
+
+    // Гарнітура є в списку пристроїв зв'язку (Android 12+) або серед входів (старіші версії): лише тоді її мікрофон можна підключити
+    private boolean hasCommunicationHeadset() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return findCommunicationHeadset() != null;
+        return hasHeadsetInput();
     }
 
     // Назва підключеного Bluetooth-виходу (порожня, якщо його немає): за нею застосунок розрізняє пристрої
